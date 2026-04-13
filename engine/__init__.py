@@ -1,21 +1,23 @@
 """Torrent engine package."""
 
-from .bandwidth import BandwidthOptimizer, BandwidthSnapshot
-from .controller import Controller, ControllerSnapshot
-from .peers import PeerManager, PeerSnapshot, ScoredPeer
-from .scheduler import PieceScore, Scheduler
-from .torrent import TorrentEngine, TorrentStatus
+from .bandwidth import BandwidthOptimizer
+from .controller import Controller
+from .peers import PeerManager
+from .scheduler import Scheduler
+from .torrent import TorrentEngine
+from .models import TorrentState, PeerInfo, PieceInfo, PieceScore, ScoredPeer
+from .config import EngineConfig
 
 __all__ = [
     "BandwidthOptimizer",
-    "BandwidthSnapshot",
     "Controller",
-    "ControllerSnapshot",
     "PeerManager",
-    "PeerSnapshot",
-    "PieceScore",
     "Scheduler",
-    "ScoredPeer",
     "TorrentEngine",
-    "TorrentStatus",
+    "TorrentState",
+    "PeerInfo",
+    "PieceInfo",
+    "PieceScore",
+    "ScoredPeer",
+    "EngineConfig"
 ]

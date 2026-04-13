@@ -2,229 +2,168 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
-from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-if TYPE_CHECKING:
-    from engine.bandwidth import BandwidthOptimizer, BandwidthSnapshot
-    from engine.peers import PeerManager, ScoredPeer
-    from engine.scheduler import PieceScore, Scheduler
-    from engine.torrent import TorrentEngine, TorrentStatus
+from engine.config import EngineConfig
+from engine.models import TorrentState, PieceState, PriorityBucket
+from engine.exceptions import EngineError
+from engine.logger import get_logger
+from engine.events import EventBus
+from engine.metrics import MetricsCollector
 
+from engine.bandwidth import BandwidthOptimizer
+from engine.peers import PeerManager
+from engine.scheduler import Scheduler
+from engine.torrent import TorrentEngine
 
-def _load_runtime_dependencies() -> tuple[type[Any], type[Any], type[Any]]:
-    try:
-        bandwidth_module = import_module("engine.bandwidth")
-        peers_module = import_module("engine.peers")
-        scheduler_module = import_module("engine.scheduler")
-    except ModuleNotFoundError:  # pragma: no cover - convenience for direct script execution
-        bandwidth_module = import_module("bandwidth")
-        peers_module = import_module("peers")
-        scheduler_module = import_module("scheduler")
-
-    bandwidth_optimizer_class = getattr(bandwidth_module, "BandwidthOptimizer")
-    peer_manager_class = getattr(peers_module, "PeerManager")
-    scheduler_class = getattr(scheduler_module, "Scheduler")
-    return bandwidth_optimizer_class, peer_manager_class, scheduler_class
-
-
-Clock = Callable[[], float]
-SleepFunc = Callable[[float], Awaitable[None]]
-StatsPrinter = Callable[["ControllerSnapshot"], None]
-
-
-@dataclass(slots=True)
-class ControllerSnapshot:
-    iteration: int
-    status: TorrentStatus
-    peers: list[ScoredPeer]
-    piece_scores: list[PieceScore]
-    priorities: list[int]
-    bandwidth: BandwidthSnapshot | None
-    peers_updated: bool
-    scheduler_updated: bool
-    bandwidth_updated: bool
-
+logger = get_logger(__name__)
 
 class Controller:
-    """Coordinates engine polling, peer ranking, and piece scheduling."""
+    """Coordinates engine polling, domain decoupled models, events, and fault-tolerant state loops."""
 
-    def __init__(
-        self,
-        engine: TorrentEngine,
-        peer_manager: PeerManager | None = None,
-        scheduler: Scheduler | None = None,
-        bandwidth_optimizer: BandwidthOptimizer | None = None,
-        *,
-        peer_interval: float = 1.0,
-        scheduler_interval: float = 2.0,
-        bandwidth_interval: float = 1.0,
-        clock: Clock | None = None,
-        sleep_func: SleepFunc | None = None,
-        stats_printer: StatsPrinter | None = None,
-    ) -> None:
-        if peer_interval <= 0:
-            raise ValueError("peer_interval must be positive.")
-        if scheduler_interval <= 0:
-            raise ValueError("scheduler_interval must be positive.")
-        if bandwidth_interval <= 0:
-            raise ValueError("bandwidth_interval must be positive.")
-
-        bandwidth_optimizer_class, peer_manager_class, scheduler_class = (
-            _load_runtime_dependencies()
-        )
-        self._engine = engine
-        self._peer_manager = peer_manager or peer_manager_class()
-        self._scheduler = scheduler or scheduler_class()
-        self._bandwidth_optimizer = bandwidth_optimizer or bandwidth_optimizer_class()
-        self._peer_interval = peer_interval
-        self._scheduler_interval = scheduler_interval
-        self._bandwidth_interval = bandwidth_interval
-        self._clock = clock or time.monotonic
-        self._sleep = sleep_func or asyncio.sleep
-        self._stats_printer = stats_printer or self._default_stats_printer
+    def __init__(self, config: EngineConfig | None = None) -> None:
+        self.config = config or EngineConfig()
+        
+        self.engine = TorrentEngine()
+        self.peer_manager = PeerManager(self.config.peers)
+        self.scheduler = Scheduler(self.config.scheduler)
+        self.bandwidth_optimizer = BandwidthOptimizer(self.config.bandwidth)
+        
+        self.event_bus = EventBus()
+        self.metrics = MetricsCollector()
 
         self._running = False
         self._started = False
-        self._iteration = 0
+        self._last_state: TorrentState | None = None
+        
         self._last_peer_update_at: float | None = None
         self._last_scheduler_update_at: float | None = None
         self._last_bandwidth_update_at: float | None = None
-        self._cached_peer_info: list[Any] = []
-        self._latest_peers: list[ScoredPeer] = []
-        self._latest_piece_scores: list[PieceScore] = []
-        self._latest_priorities: list[int] = []
-        self._latest_bandwidth: BandwidthSnapshot | None = None
-        self._last_snapshot: ControllerSnapshot | None = None
+        self._last_save_resume_at: float | None = None
 
-    @property
-    def last_snapshot(self) -> ControllerSnapshot | None:
-        return self._last_snapshot
+        self._lock = asyncio.Lock()
 
     def start(self, torrent_file: str | Path) -> None:
-        self._engine.start_session()
-        self._engine.add_torrent(torrent_file)
+        self.engine.start_session()
+        self.engine.add_torrent(torrent_file)
+        
         self._running = True
         self._started = True
-        self._iteration = 0
-        self._last_peer_update_at = None
-        self._last_scheduler_update_at = None
-        self._last_bandwidth_update_at = None
-        self._cached_peer_info = []
-        self._latest_peers = []
-        self._latest_piece_scores = []
-        self._latest_priorities = []
-        self._latest_bandwidth = None
-        self._last_snapshot = None
+        
+        now = time.monotonic()
+        self._last_save_resume_at = now
+        
+        logger.info("Controller started", extra={"torrent": str(torrent_file)})
+        asyncio.create_task(self.event_bus.publish("controller_started", {"torrent": str(torrent_file)}))
 
     def stop(self) -> None:
         self._running = False
 
-    async def run(
-        self,
-        torrent_file: str | Path,
-        *,
-        poll_interval: float = 0.25,
-        max_iterations: int | None = None,
-    ) -> ControllerSnapshot | None:
-        if poll_interval <= 0:
-            raise ValueError("poll_interval must be positive.")
-        if max_iterations is not None and max_iterations <= 0:
-            raise ValueError("max_iterations must be positive when provided.")
-
+    async def run(self, torrent_file: str | Path, poll_interval: float = 0.5) -> None:
         self.start(torrent_file)
 
         try:
             while self._running:
-                snapshot = self.tick()
-
-                if max_iterations is not None and snapshot.iteration >= max_iterations:
+                await self.tick()
+                
+                if self._last_state and self._last_state.progress >= 100.0:
+                    logger.info("Download completed natively")
+                    await self.event_bus.publish("download_complete", {"state": self._last_state})
                     self.stop()
-                elif snapshot.status.progress >= 100.0:
-                    self.stop()
-
+                    
                 if self._running:
-                    await self._sleep(poll_interval)
-
-            return self._last_snapshot
+                    await asyncio.sleep(poll_interval)
+                    
+        except EngineError as e:
+            logger.exception("Domain error occurred in main loop", extra={"error": str(e)})
+            await self.event_bus.publish("error", {"error": str(e)})
+        except asyncio.CancelledError:
+            logger.info("Controller loop cancelled")
         finally:
-            self.stop()
+            await self.shutdown()
 
-    def tick(self, now: float | None = None) -> ControllerSnapshot:
-        if not self._started:
-            raise RuntimeError("Controller has not been started.")
+    def get_state(self) -> TorrentState | None:
+        """Safe boundary for UIs to snapshot the absolute state instantly."""
+        return self._last_state
 
-        observed_at = self._clock() if now is None else now
-        peers_updated = False
-        scheduler_updated = False
-        bandwidth_updated = False
-        raw_peer_info: list[Any] | None = None
+    async def tick(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            
+            # Extract state
+            state = self.engine.get_state()
+            self._last_state = state
+            
+            # Metrics Logging
+            self.metrics.record_speed(state.download_speed)
+            
+            # Sub-system Interval triggers
+            if self._is_due(self._last_peer_update_at, self.config.peer_interval, now):
+                peers = self.engine.get_peers(active_time=now)
+                scored_peers = self.peer_manager.evaluate(peers)
+                self._last_peer_update_at = now
+                
+                await self.event_bus.publish("peers_updated", {
+                    "total": len(peers),
+                    "choked": sum(1 for p in peers if p.is_choked)
+                })
 
-        if self._is_due(self._last_peer_update_at, self._peer_interval, observed_at):
-            raw_peer_info = self._engine.get_peer_info()
-            self._cached_peer_info = list(raw_peer_info)
-            self._latest_peers = self._peer_manager.collect(raw_peer_info, now=observed_at)
-            self._last_peer_update_at = observed_at
-            peers_updated = True
+            if self._is_due(self._last_scheduler_update_at, self.config.scheduler_interval, now):
+                pieces = self.engine.get_pieces()
+                peers = self.engine.get_peers(active_time=now)
+                
+                scored_pieces = self.scheduler.score_pieces(pieces, peers)
+                
+                # Assign bucket values
+                priorities = [0] * len(pieces)
+                for sp in scored_pieces:
+                    val = sp.priority.value
+                    priorities[sp.info.index] = val
+                    if sp.info.is_complete:
+                        self.metrics.record_piece_complete()
 
-        if self._is_due(self._last_scheduler_update_at, self._scheduler_interval, observed_at):
-            if raw_peer_info is None:
-                raw_peer_info = list(self._cached_peer_info) if self._cached_peer_info else self._engine.get_peer_info()
-                self._cached_peer_info = list(raw_peer_info)
+                self.engine.apply_priorities(priorities)
+                self._last_scheduler_update_at = now
+                
+                active_pieces = sum(1 for p in pieces if not p.is_complete and p.state in (PieceState.REQUESTED, PieceState.DOWNLOADING))
+                assigned_high = sum(1 for p in priorities if p == PriorityBucket.HIGH.value)
+                assigned_low = sum(1 for p in priorities if p == PriorityBucket.LOW.value)
 
-            handle = self._engine.get_handle()
-            self._latest_piece_scores = self._scheduler.score_pieces(handle, peer_infos=raw_peer_info)
-            self._latest_priorities = self._scheduler.apply_scored_pieces(handle, self._latest_piece_scores)
-            self._last_scheduler_update_at = observed_at
-            scheduler_updated = True
+                logger.debug("scheduler_decisions", extra={
+                    "assigned_total": len(scored_pieces),
+                    "active_pieces": active_pieces,
+                    "high_priority_count": assigned_high,
+                    "low_priority_count": assigned_low,
+                })
+                await self.event_bus.publish("pieces_scheduled", {"assigned": len(scored_pieces)})
 
-        status = self._engine.get_status()
-        if self._is_due(self._last_bandwidth_update_at, self._bandwidth_interval, observed_at):
-            self._latest_bandwidth = self._bandwidth_optimizer.observe(status, self._engine.get_session())
-            self._last_bandwidth_update_at = observed_at
-            bandwidth_updated = True
+            if self._is_due(self._last_bandwidth_update_at, self.config.bandwidth_interval, now):
+                settings = self.engine.get_session_settings()
+                tuned = self.bandwidth_optimizer.observe_and_tune(state, settings)
+                self.engine.apply_session_settings(tuned)
+                self._last_bandwidth_update_at = now
+                
+            if self._is_due(self._last_save_resume_at, self.config.autosave_resume_interval, now):
+                self.engine.save_resume_data()
+                self._last_save_resume_at = now
+                await self.event_bus.publish("autosave_triggered")
 
-        self._iteration += 1
-        snapshot = ControllerSnapshot(
-            iteration=self._iteration,
-            status=status,
-            peers=list(self._latest_peers),
-            piece_scores=list(self._latest_piece_scores),
-            priorities=list(self._latest_priorities),
-            bandwidth=self._latest_bandwidth,
-            peers_updated=peers_updated,
-            scheduler_updated=scheduler_updated,
-            bandwidth_updated=bandwidth_updated,
-        )
-        self._last_snapshot = snapshot
-        self._stats_printer(snapshot)
-        return snapshot
+            # Detailed loop tracking
+            m = self.metrics.get_metrics()
+            logger.debug("torrent_status", extra={
+                "progress": round(state.progress, 2),
+                "speed_kb": round(state.download_speed / 1024, 2),
+                "peers": state.peers_connected,
+                "avg_speed_kb": round(m.avg_download_speed / 1024, 2)
+            })
+
+    async def shutdown(self) -> None:
+        logger.info("Initiating controller shutdown")
+        async with self._lock:
+            self.engine.save_resume_data()
+            self.engine.pause_and_shutdown()
+            await self.event_bus.publish("controller_shutdown")
 
     @staticmethod
     def _is_due(last_updated_at: float | None, interval: float, now: float) -> bool:
         return last_updated_at is None or (now - last_updated_at) >= interval
-
-    @staticmethod
-    def _format_speed(bytes_per_second: int) -> str:
-        units = ["B/s", "KiB/s", "MiB/s", "GiB/s"]
-        value = float(bytes_per_second)
-
-        for unit in units[:-1]:
-            if value < 1024:
-                return f"{value:.1f} {unit}"
-            value /= 1024
-
-        return f"{value:.1f} {units[-1]}"
-
-    def _default_stats_printer(self, snapshot: ControllerSnapshot) -> None:
-        line = (
-            f"\rProgress: {snapshot.status.progress:6.2f}% | "
-            f"Download: {self._format_speed(snapshot.status.download_rate):>12} | "
-            f"Peers: {snapshot.status.peers:3d} | "
-            f"Ranked: {len(snapshot.peers):3d} | "
-            f"Scheduled: {len(snapshot.priorities):3d} | "
-            f"Mode: {'aggressive' if snapshot.bandwidth and snapshot.bandwidth.aggressive_mode else 'normal'}"
-        )
-        print(line, end="", flush=True)
