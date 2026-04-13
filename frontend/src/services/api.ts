@@ -1,4 +1,4 @@
-import type { ApiResponse, GlobalStats, TorrentItem } from "../types/api";
+import type { ApiResponse, GlobalStats, DebugStats, TorrentItem } from "../types/api";
 
 const API_BASE_URL = "http://localhost:8000/api";
 
@@ -24,6 +24,9 @@ export const engineApi = {
 
   getStats: () => 
     fetchApi<GlobalStats>("/stats"),
+
+  getDebugStats: () => 
+    fetchApi<DebugStats>("/debug"),
 
   pauseTorrent: (id: string) => 
     fetchApi(`/torrent/${id}/pause`, { method: "POST" }),

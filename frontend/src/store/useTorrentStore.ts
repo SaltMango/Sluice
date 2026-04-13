@@ -1,10 +1,11 @@
 import { create } from "zustand";
-import type { GlobalStats, TorrentItem } from "../types/api";
+import type { GlobalStats, DebugStats, TorrentItem } from "../types/api";
 import { engineApi } from "../services/api";
 
 interface TorrentStore {
   torrents: TorrentItem[];
   stats: GlobalStats;
+  debugStats: DebugStats | null;
   isLoading: boolean;
   error: string | null;
   
@@ -25,20 +26,23 @@ export const useTorrentStore = create<TorrentStore>((set, get) => ({
     active_torrents: 0,
     aggressive_mode: false,
   },
+  debugStats: null,
   isLoading: true,
   error: null,
 
   fetchData: async () => {
     try {
-      const [torrentsRes, statsRes] = await Promise.all([
+      const [torrentsRes, statsRes, debugRes] = await Promise.all([
         engineApi.getTorrents(),
-        engineApi.getStats()
+        engineApi.getStats(),
+        engineApi.getDebugStats()
       ]);
 
       if (torrentsRes.success && statsRes.success) {
         set({
           torrents: torrentsRes.data?.torrents || [],
           stats: statsRes.data || get().stats,
+          debugStats: debugRes.success ? debugRes.data : get().debugStats,
           isLoading: false,
           error: null
         });

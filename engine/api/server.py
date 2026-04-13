@@ -237,4 +237,38 @@ async def toggle_mode(req: ModeToggleRequest):
     MOCK_AGGRESSIVE_MODE = req.aggressive_mode
     return ApiResponse(success=True, data={"aggressive_mode": MOCK_AGGRESSIVE_MODE})
 
+@app.get("/api/debug", response_model=ApiResponse)
+async def get_debug_stats():
+    global MOCK_AGGRESSIVE_MODE
+    
+    is_downloading = any(t.status == TorrentStatus.downloading for t in MOCK_TORRENTS.values())
+
+    if is_downloading:
+        # Generate some mock data simulating the scheduler
+        active_pieces = random.randint(150, 400)
+        avg_speed = random.randint(500_000, 3_000_000)
+        total_peers = sum(t.peers for t in MOCK_TORRENTS.values()) if MOCK_TORRENTS else random.randint(20, 100)
+        fast_peers = int(total_peers * random.uniform(0.2, 0.4))
+        slow_peers = total_peers - fast_peers
+        bw_utilization = random.uniform(40.0, 95.0)
+    else:
+        active_pieces = 0
+        avg_speed = 0
+        fast_peers = 0
+        slow_peers = 0
+        bw_utilization = 0.0
+    
+    mode = "aggressive" if MOCK_AGGRESSIVE_MODE else "rarest_first"
+
+    return ApiResponse(
+        success=True,
+        data={
+            "scheduler_mode": mode,
+            "active_pieces": active_pieces,
+            "average_peer_speed": avg_speed,
+            "fast_peers": fast_peers,
+            "slow_peers": slow_peers,
+            "bandwidth_utilization_percent": bw_utilization
+        }
+    )
 

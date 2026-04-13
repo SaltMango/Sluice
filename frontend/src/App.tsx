@@ -3,6 +3,7 @@ import { TopBar } from "./components/layout/TopBar";
 import { StatsBar } from "./components/layout/StatsBar";
 import { TorrentTable } from "./components/torrent/TorrentTable";
 import { AddTorrentModal } from "./components/torrent/AddTorrentModal";
+import { DebugPanel } from "./components/debug/DebugPanel";
 import { useTorrentStore } from "./store/useTorrentStore";
 
 function App() {
@@ -44,6 +45,7 @@ function App() {
       </main>
 
       <StatsBar />
+      <DebugPanel />
 
       {showAddModal && <AddTorrentModal onClose={() => setShowAddModal(false)} />}
     </div>

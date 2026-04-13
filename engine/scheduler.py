@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 from typing import Sequence
 
@@ -30,6 +31,7 @@ class Scheduler:
         self._random = random.Random(self.config.seed)
         self._ticks = 0
         self._last_priorities: list[PieceScore] = []
+        self.last_metrics: dict[str, float | int] = {}
 
     def score_pieces(self, pieces: Sequence[PieceInfo], peers: Sequence[PeerInfo]) -> list[PieceScore]:
         piece_count = len(pieces)
@@ -63,20 +65,43 @@ class Scheduler:
         rarity_values = [v + n for v, n in zip(normalize_inverse(availabilities), noise)]
         position_values = self._build_position_values(piece_count)
         peer_availability_values = normalize_linear(peer_availability)
-        peer_speed_values = normalize_linear(peer_speed)
+        # Apply sub-linear scaling to peer speed
+        peer_speed_scaled = [math.sqrt(s) for s in peer_speed]
+        peer_speed_values = normalize_linear(peer_speed_scaled)
+
+        total_speed = sum(max(p.download_speed, 0) for p in peers)
+        self.last_metrics = {
+            "swarm_speed_computed": total_speed,
+            "pieces_scored": 0,
+            "rare_pieces_boosted": 0,
+            "high_priority_count": 0,
+            "average_score": 0.0,
+        }
+
+        # Dynamically balance speed weight in high bandwidth environments
+        current_speed_weight = self._speed_weight
+        if total_speed > 10 * 1024 * 1024:  # > 10 MB/s
+            current_speed_weight *= 1.2
 
         raw_scores: list[float] = []
         for i, p in enumerate(pieces):
-            if p.is_complete or p.state == PieceState.AVAILABLE == False:
+            if p.is_complete or p.state != PieceState.AVAILABLE:
                 raw_scores.append(0.0)
                 continue
 
+            self.last_metrics["pieces_scored"] += 1
             raw_scores.append(
                 rarity_values[i] * self._rarity_weight
                 + position_values[i] * self._position_weight
                 + peer_availability_values[i] * self._peer_weight
-                + peer_speed_values[i] * self._speed_weight
+                + peer_speed_values[i] * current_speed_weight
             )
+
+        pieces_scored = self.last_metrics["pieces_scored"]
+        # Cast required for strict typing checks because dict is mixed values
+        assert isinstance(pieces_scored, int)
+        if pieces_scored > 0:
+            self.last_metrics["average_score"] = float(sum(raw_scores) / pieces_scored)
 
         priorities = self._build_priority_buckets(raw_scores, pieces)
 
@@ -116,7 +141,21 @@ class Scheduler:
         # Calculate availability for rarest pieces
         min_availability = min([p.availability for p in pieces if not p.is_complete], default=1)
 
+        # Determine guardrail limits to prevent rare-piece starvation from flooding HIGH priority
+        max_rarest_boost = int(len(pieces) * self.config.rarest_bandwidth_guarantee_percent)
+        rarest_boosted_count = 0
+
+        # Percentile thresholds: sort incomplete scores to find dynamic distribution
+        sorted_scores = sorted(incomplete_scores)
+        n = len(sorted_scores)
+        
+        # Dynamic Percentiles: Top 15% HIGH, next 25% MEDIUM (top 40%), next 45% DEFAULT (top 85%), rest LOW
+        high_thresh = sorted_scores[max(0, int(n * 0.85))] if n > 0 else 0.0
+        medium_thresh = sorted_scores[max(0, int(n * 0.60))] if n > 0 else 0.0
+        default_thresh = sorted_scores[max(0, int(n * 0.15))] if n > 0 else 0.0
+
         buckets = []
+        high_count = 0
         for i, piece in enumerate(pieces):
             if piece.is_complete or piece.state == PieceState.COMPLETE:
                 buckets.append(PriorityBucket.IGNORE)
@@ -124,23 +163,29 @@ class Scheduler:
                 
             score = scores[i]
             
-            # Guardrail: Guarantee Absolute Rarest are protected.
+            # Guardrail: Guarantee Absolute Rarest are protected up to a bandwidth capacity limit.
             if self.config.min_rarest_pieces_always_downloaded and piece.availability <= min_availability + 1:
-                buckets.append(PriorityBucket.HIGH)
-                continue
+                if rarest_boosted_count < max_rarest_boost:
+                    buckets.append(PriorityBucket.HIGH)
+                    rarest_boosted_count += 1
+                    high_count += 1
+                    continue
 
             if maximum == minimum:
                 buckets.append(PriorityBucket.DEFAULT)
                 continue
 
-            norm = (score - minimum) / (maximum - minimum)
-            if norm >= 0.75:
+            if score >= high_thresh:
                 buckets.append(PriorityBucket.HIGH)
-            elif norm >= 0.40:
+                high_count += 1
+            elif score >= medium_thresh:
                 buckets.append(PriorityBucket.MEDIUM)
-            elif norm >= 0.15:
+            elif score >= default_thresh:
                 buckets.append(PriorityBucket.DEFAULT)
             else:
                 buckets.append(PriorityBucket.LOW)
+
+        self.last_metrics["rare_pieces_boosted"] = rarest_boosted_count
+        self.last_metrics["high_priority_count"] = high_count
 
         return buckets

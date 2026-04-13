@@ -33,3 +33,13 @@ export interface GlobalStats {
   aggressive_mode?: boolean;
   aggression_level?: number;
 }
+
+export interface DebugStats {
+  scheduler_mode: string;
+  active_pieces: number;
+  average_peer_speed: number;
+  fast_peers: number;
+  slow_peers: number;
+  bandwidth_utilization_percent: number;
+}
+
