@@ -35,6 +35,8 @@ def test_package_exports(import_engine) -> None:
     assert engine_package.__all__ == [
         "PeerManager",
         "PeerSnapshot",
+        "PieceScore",
+        "Scheduler",
         "ScoredPeer",
         "TorrentEngine",
         "TorrentStatus",
@@ -114,6 +116,9 @@ def test_get_status_and_peer_info_behaviour(tmp_path: Path, import_engine) -> No
     with pytest.raises(RuntimeError, match="No torrent has been added yet"):
         engine.get_peer_info()
 
+    with pytest.raises(RuntimeError, match="No torrent has been added yet"):
+        engine.get_handle()
+
     fake_status = SimpleNamespace(
         name="ubuntu.iso",
         progress=0.5,
@@ -137,6 +142,7 @@ def test_get_status_and_peer_info_behaviour(tmp_path: Path, import_engine) -> No
         state="downloading",
     )
     assert engine.get_peer_info() == fake_peer_list
+    assert engine.get_handle() is engine._handle
 
 
 def test_default_download_directory_uses_project_root(import_engine) -> None:

@@ -30,6 +30,7 @@ def test_torrent_engine_with_real_libtorrent(enable_real_libtorrent, tmp_path: P
     clear_engine_modules()
     import libtorrent as lt
     from engine.peers import PeerManager
+    from engine.scheduler import Scheduler
     from engine.torrent import TorrentEngine
 
     torrent_path = build_test_torrent(tmp_path, lt)
@@ -40,6 +41,7 @@ def test_torrent_engine_with_real_libtorrent(enable_real_libtorrent, tmp_path: P
     status = engine.get_status()
     peers = engine.get_peer_info()
     ranked_peers = PeerManager().collect(peers, now=10.0)
+    priorities = Scheduler().apply(engine.get_handle(), peer_infos=peers)
 
     assert status.name == "payload"
     assert status.progress == 0.0
@@ -48,6 +50,8 @@ def test_torrent_engine_with_real_libtorrent(enable_real_libtorrent, tmp_path: P
     assert isinstance(status.state, str)
     assert peers == []
     assert ranked_peers == []
+    assert priorities == [4]
+    assert list(engine.get_handle().get_piece_priorities()) == [4]
 
 
 @pytest.mark.integration

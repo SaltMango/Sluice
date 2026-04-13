@@ -75,6 +75,12 @@ class TorrentEngine:
 
         return list(self._handle.get_peer_info())
 
+    def get_handle(self) -> Any:
+        if self._handle is None:
+            raise RuntimeError("No torrent has been added yet.")
+
+        return self._handle
+
     @staticmethod
     def _resolve_state_name(state: object) -> str:
         return str(state)
