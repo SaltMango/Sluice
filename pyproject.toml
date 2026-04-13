@@ -3,7 +3,13 @@ name = "sluice"
 version = "0.1.0"
 description = "Torrent engine experiments built on libtorrent."
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "python-multipart",
+    "libtorrent"
+]
 
 [project.optional-dependencies]
 test = [

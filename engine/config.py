@@ -33,12 +33,14 @@ class BandwidthConfig:
     backoff_cooldown_ticks: int = 2
     max_aggression_level: int = 3
 
+from dataclasses import dataclass, field
+
 @dataclass
 class EngineConfig:
     peer_interval: float = 1.0
     scheduler_interval: float = 2.0
     bandwidth_interval: float = 1.0
     autosave_resume_interval: float = 60.0
-    scheduler: SchedulerConfig = SchedulerConfig()
-    peers: PeerConfig = PeerConfig()
-    bandwidth: BandwidthConfig = BandwidthConfig()
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    peers: PeerConfig = field(default_factory=PeerConfig)
+    bandwidth: BandwidthConfig = field(default_factory=BandwidthConfig)

@@ -1,27 +1,51 @@
 import { useEffect, useState } from "react";
+import { TopBar } from "./components/layout/TopBar";
+import { StatsBar } from "./components/layout/StatsBar";
+import { TorrentTable } from "./components/torrent/TorrentTable";
+import { AddTorrentModal } from "./components/torrent/AddTorrentModal";
+import { useTorrentStore } from "./store/useTorrentStore";
 
 function App() {
-  const [status, setStatus] = useState("loading...");
-  const [error, setError] = useState("");
+  const [showAddModal, setShowAddModal] = useState(false);
+  const fetchData = useTorrentStore((state) => state.fetchData);
+  const error = useTorrentStore((state) => state.error);
 
   useEffect(() => {
-    fetch("http://127.0.0.1:8000/status")
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data) => setStatus(data.status))
-      .catch((err) => {
-        console.error("Fetch error:", err);
-        setError(err.message);
-        setStatus("failed");
-      });
-  }, []);
+    // Initial fetch
+    fetchData();
+
+    // Polling interval
+    const interval = setInterval(() => {
+      fetchData();
+    }, 2000); // Poll every 2 seconds
+
+    return () => clearInterval(interval);
+  }, [fetchData]);
 
   return (
-    <div>
-      <h1>Engine: {status}</h1>
-      {error && <p style={{ color: "red" }}>Error: {error}</p>}
+    <div className="app-container">
+      <TopBar onAddClick={() => setShowAddModal(true)} />
+      
+      <main className="main-content">
+        {error && (
+          <div style={{
+            background: 'rgba(239, 71, 111, 0.1)', 
+            color: 'var(--status-error)', 
+            padding: '12px 16px', 
+            borderRadius: '6px', 
+            marginBottom: '20px',
+            border: '1px solid rgba(239, 71, 111, 0.2)'
+          }}>
+            Connection Error: {error}
+          </div>
+        )}
+        
+        <TorrentTable />
+      </main>
+
+      <StatsBar />
+
+      {showAddModal && <AddTorrentModal onClose={() => setShowAddModal(false)} />}
     </div>
   );
 }
