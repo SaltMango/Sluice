@@ -14,6 +14,25 @@ class FakeHandle:
         self.applied_priorities = priorities
 
 
+class FakeSession:
+    def __init__(self) -> None:
+        self.settings = {
+            "connections_limit": 200,
+            "connection_speed": 30,
+            "max_out_request_queue": 500,
+            "max_allowed_in_request_queue": 2000,
+            "request_queue_time": 3,
+        }
+        self.applied_settings: list[dict[str, int]] = []
+
+    def get_settings(self) -> dict[str, int]:
+        return dict(self.settings)
+
+    def apply_settings(self, settings: dict[str, int]) -> None:
+        self.applied_settings.append(dict(settings))
+        self.settings.update(settings)
+
+
 class FakeEngine:
     def __init__(self) -> None:
         self.started = False
@@ -21,6 +40,7 @@ class FakeEngine:
         self.peer_calls = 0
         self.status_calls = 0
         self.handle = FakeHandle()
+        self.session = FakeSession()
         self.peer_sequences = [
             [SimpleNamespace(ip=("10.0.0.1", 6881), down_speed=300, flags=0, pieces=[True, False])],
             [SimpleNamespace(ip=("10.0.0.2", 6881), down_speed=500, flags=0, pieces=[True, True])],
@@ -45,6 +65,9 @@ class FakeEngine:
 
     def get_handle(self) -> FakeHandle:
         return self.handle
+
+    def get_session(self) -> FakeSession:
+        return self.session
 
     def get_status(self) -> object:
         index = min(self.status_calls, len(self.status_sequences) - 1)
@@ -81,16 +104,37 @@ class FakeScheduler:
         return priorities
 
 
+class FakeBandwidthOptimizer:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, object]] = []
+
+    def observe(self, status: object, session: object) -> object:
+        self.calls.append((status, session))
+        return SimpleNamespace(
+            current_speed=getattr(status, "download_rate", 0),
+            estimated_max_bandwidth=1000,
+            rolling_peak=max(getattr(status, "download_rate", 0), 1),
+            utilization_ratio=0.5,
+            is_underutilized=False,
+            is_unstable=False,
+            aggressive_mode=False,
+            aggression_level=0,
+            settings={"connections_limit": 200},
+        )
+
+
 def test_controller_tick_respects_intervals_and_caches_state(import_engine) -> None:
     controller_module = import_engine("engine.controller")
     engine = FakeEngine()
     peer_manager = FakePeerManager()
     scheduler = FakeScheduler()
+    bandwidth = FakeBandwidthOptimizer()
     printed: list[object] = []
     controller = controller_module.Controller(
         engine=engine,
         peer_manager=peer_manager,
         scheduler=scheduler,
+        bandwidth_optimizer=bandwidth,
         stats_printer=printed.append,
     )
 
@@ -105,18 +149,25 @@ def test_controller_tick_respects_intervals_and_caches_state(import_engine) -> N
     assert engine.added_torrent == "demo.torrent"
     assert first.peers_updated is True
     assert first.scheduler_updated is True
+    assert first.bandwidth_updated is True
     assert second.peers_updated is False
     assert second.scheduler_updated is False
+    assert second.bandwidth_updated is False
     assert third.peers_updated is True
     assert third.scheduler_updated is False
+    assert third.bandwidth_updated is True
     assert fourth.peers_updated is True
     assert fourth.scheduler_updated is True
+    assert fourth.bandwidth_updated is True
     assert fourth.status.progress == 100.0
     assert fourth.priorities == [4, 6]
+    assert fourth.bandwidth is not None
     assert engine.handle.applied_priorities == [4, 6]
+    assert engine.session.applied_settings == []
     assert len(peer_manager.calls) == 3
     assert len(scheduler.score_calls) == 2
     assert len(scheduler.apply_calls) == 2
+    assert len(bandwidth.calls) == 3
     assert len(printed) == 4
     assert controller.last_snapshot == fourth
 
@@ -130,6 +181,9 @@ def test_controller_tick_requires_start_and_validates_intervals(import_engine) -
 
     with pytest.raises(ValueError, match="scheduler_interval"):
         controller_module.Controller(engine=engine, scheduler_interval=0.0)
+
+    with pytest.raises(ValueError, match="bandwidth_interval"):
+        controller_module.Controller(engine=engine, bandwidth_interval=0.0)
 
     controller = controller_module.Controller(engine=engine, stats_printer=lambda _snapshot: None)
 
@@ -153,6 +207,7 @@ def test_controller_run_is_async_and_stops_on_completion(import_engine) -> None:
     engine = FakeEngine()
     peer_manager = FakePeerManager()
     scheduler = FakeScheduler()
+    bandwidth = FakeBandwidthOptimizer()
     current_time = {"value": 0.0}
     sleeps: list[float] = []
 
@@ -164,6 +219,7 @@ def test_controller_run_is_async_and_stops_on_completion(import_engine) -> None:
         engine=engine,
         peer_manager=peer_manager,
         scheduler=scheduler,
+        bandwidth_optimizer=bandwidth,
         clock=lambda: current_time["value"],
         sleep_func=fake_sleep,
         stats_printer=lambda _snapshot: None,
@@ -193,12 +249,15 @@ def test_controller_uses_cached_peers_for_scheduler_only_tick(import_engine) -> 
     engine = FakeEngine()
     peer_manager = FakePeerManager()
     scheduler = FakeScheduler()
+    bandwidth = FakeBandwidthOptimizer()
     controller = controller_module.Controller(
         engine=engine,
         peer_manager=peer_manager,
         scheduler=scheduler,
+        bandwidth_optimizer=bandwidth,
         peer_interval=10.0,
         scheduler_interval=2.0,
+        bandwidth_interval=10.0,
         stats_printer=lambda _snapshot: None,
     )
 
@@ -208,6 +267,7 @@ def test_controller_uses_cached_peers_for_scheduler_only_tick(import_engine) -> 
 
     assert scheduler_only.peers_updated is False
     assert scheduler_only.scheduler_updated is True
+    assert scheduler_only.bandwidth_updated is False
     assert len(peer_manager.calls) == 1
     assert len(scheduler.score_calls) == 2
     assert engine.peer_calls == 1
@@ -230,6 +290,7 @@ def test_controller_run_honors_max_iterations(import_engine) -> None:
     controller = controller_module.Controller(
         engine=engine,
         scheduler=FakeScheduler(),
+        bandwidth_optimizer=FakeBandwidthOptimizer(),
         clock=lambda: current_time["value"],
         sleep_func=fake_sleep,
         stats_printer=lambda _snapshot: None,
@@ -255,8 +316,10 @@ def test_controller_default_stats_printer_outputs_line(
         peers=[SimpleNamespace()],
         piece_scores=[],
         priorities=[4, 6],
+        bandwidth=SimpleNamespace(aggressive_mode=True),
         peers_updated=True,
         scheduler_updated=True,
+        bandwidth_updated=True,
     )
 
     controller._default_stats_printer(snapshot)
@@ -267,3 +330,4 @@ def test_controller_default_stats_printer_outputs_line(
     assert "Peers:   3" in output
     assert "Ranked:   1" in output
     assert "Scheduled:   2" in output
+    assert "Mode: aggr" in output

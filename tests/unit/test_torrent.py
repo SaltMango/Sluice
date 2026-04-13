@@ -33,6 +33,8 @@ def test_package_exports(import_engine) -> None:
     engine_package = import_engine("engine")
 
     assert engine_package.__all__ == [
+        "BandwidthOptimizer",
+        "BandwidthSnapshot",
         "Controller",
         "ControllerSnapshot",
         "PeerManager",
@@ -121,6 +123,9 @@ def test_get_status_and_peer_info_behaviour(tmp_path: Path, import_engine) -> No
     with pytest.raises(RuntimeError, match="No torrent has been added yet"):
         engine.get_handle()
 
+    with pytest.raises(RuntimeError, match="Session has not been started yet"):
+        engine.get_session()
+
     fake_status = SimpleNamespace(
         name="ubuntu.iso",
         progress=0.5,
@@ -129,6 +134,8 @@ def test_get_status_and_peer_info_behaviour(tmp_path: Path, import_engine) -> No
         state="downloading",
     )
     fake_peer_list = [SimpleNamespace(ip=("127.0.0.1", 6881))]
+    fake_session = SimpleNamespace()
+    engine._session = fake_session
     engine._handle = SimpleNamespace(
         status=lambda: fake_status,
         get_peer_info=lambda: fake_peer_list,
@@ -145,6 +152,7 @@ def test_get_status_and_peer_info_behaviour(tmp_path: Path, import_engine) -> No
     )
     assert engine.get_peer_info() == fake_peer_list
     assert engine.get_handle() is engine._handle
+    assert engine.get_session() is fake_session
 
 
 def test_default_download_directory_uses_project_root(import_engine) -> None:

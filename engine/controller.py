@@ -7,10 +7,12 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 try:
+    from .bandwidth import BandwidthOptimizer, BandwidthSnapshot
     from .peers import PeerManager, ScoredPeer
     from .scheduler import PieceScore, Scheduler
     from .torrent import TorrentEngine, TorrentStatus
 except ImportError:  # pragma: no cover - convenience for direct script execution
+    from bandwidth import BandwidthOptimizer, BandwidthSnapshot
     from peers import PeerManager, ScoredPeer
     from scheduler import PieceScore, Scheduler
     from torrent import TorrentEngine, TorrentStatus
@@ -28,8 +30,10 @@ class ControllerSnapshot:
     peers: list[ScoredPeer]
     piece_scores: list[PieceScore]
     priorities: list[int]
+    bandwidth: BandwidthSnapshot | None
     peers_updated: bool
     scheduler_updated: bool
+    bandwidth_updated: bool
 
 
 class Controller:
@@ -40,9 +44,11 @@ class Controller:
         engine: TorrentEngine,
         peer_manager: PeerManager | None = None,
         scheduler: Scheduler | None = None,
+        bandwidth_optimizer: BandwidthOptimizer | None = None,
         *,
         peer_interval: float = 1.0,
         scheduler_interval: float = 2.0,
+        bandwidth_interval: float = 1.0,
         clock: Clock | None = None,
         sleep_func: SleepFunc | None = None,
         stats_printer: StatsPrinter | None = None,
@@ -51,12 +57,16 @@ class Controller:
             raise ValueError("peer_interval must be positive.")
         if scheduler_interval <= 0:
             raise ValueError("scheduler_interval must be positive.")
+        if bandwidth_interval <= 0:
+            raise ValueError("bandwidth_interval must be positive.")
 
         self._engine = engine
         self._peer_manager = peer_manager or PeerManager()
         self._scheduler = scheduler or Scheduler()
+        self._bandwidth_optimizer = bandwidth_optimizer or BandwidthOptimizer()
         self._peer_interval = peer_interval
         self._scheduler_interval = scheduler_interval
+        self._bandwidth_interval = bandwidth_interval
         self._clock = clock or time.monotonic
         self._sleep = sleep_func or asyncio.sleep
         self._stats_printer = stats_printer or self._default_stats_printer
@@ -66,10 +76,12 @@ class Controller:
         self._iteration = 0
         self._last_peer_update_at: float | None = None
         self._last_scheduler_update_at: float | None = None
+        self._last_bandwidth_update_at: float | None = None
         self._cached_peer_info: list[Any] = []
         self._latest_peers: list[ScoredPeer] = []
         self._latest_piece_scores: list[PieceScore] = []
         self._latest_priorities: list[int] = []
+        self._latest_bandwidth: BandwidthSnapshot | None = None
         self._last_snapshot: ControllerSnapshot | None = None
 
     @property
@@ -84,10 +96,12 @@ class Controller:
         self._iteration = 0
         self._last_peer_update_at = None
         self._last_scheduler_update_at = None
+        self._last_bandwidth_update_at = None
         self._cached_peer_info = []
         self._latest_peers = []
         self._latest_piece_scores = []
         self._latest_priorities = []
+        self._latest_bandwidth = None
         self._last_snapshot = None
 
     def stop(self) -> None:
@@ -127,6 +141,7 @@ class Controller:
         observed_at = self._clock() if now is None else now
         peers_updated = False
         scheduler_updated = False
+        bandwidth_updated = False
         raw_peer_info: list[Any] | None = None
 
         if self._is_due(self._last_peer_update_at, self._peer_interval, observed_at):
@@ -148,6 +163,11 @@ class Controller:
             scheduler_updated = True
 
         status = self._engine.get_status()
+        if self._is_due(self._last_bandwidth_update_at, self._bandwidth_interval, observed_at):
+            self._latest_bandwidth = self._bandwidth_optimizer.observe(status, self._engine.get_session())
+            self._last_bandwidth_update_at = observed_at
+            bandwidth_updated = True
+
         self._iteration += 1
         snapshot = ControllerSnapshot(
             iteration=self._iteration,
@@ -155,8 +175,10 @@ class Controller:
             peers=list(self._latest_peers),
             piece_scores=list(self._latest_piece_scores),
             priorities=list(self._latest_priorities),
+            bandwidth=self._latest_bandwidth,
             peers_updated=peers_updated,
             scheduler_updated=scheduler_updated,
+            bandwidth_updated=bandwidth_updated,
         )
         self._last_snapshot = snapshot
         self._stats_printer(snapshot)
@@ -184,6 +206,7 @@ class Controller:
             f"Download: {self._format_speed(snapshot.status.download_rate):>12} | "
             f"Peers: {snapshot.status.peers:3d} | "
             f"Ranked: {len(snapshot.peers):3d} | "
-            f"Scheduled: {len(snapshot.priorities):3d}"
+            f"Scheduled: {len(snapshot.priorities):3d} | "
+            f"Mode: {'aggr' if snapshot.bandwidth and snapshot.bandwidth.aggressive_mode else 'norm'}"
         )
         print(line, end="", flush=True)

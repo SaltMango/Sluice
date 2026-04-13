@@ -81,6 +81,12 @@ class TorrentEngine:
 
         return self._handle
 
+    def get_session(self) -> Any:
+        if self._session is None:
+            raise RuntimeError("Session has not been started yet.")
+
+        return self._session
+
     @staticmethod
     def _resolve_state_name(state: object) -> str:
         return str(state)

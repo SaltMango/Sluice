@@ -59,6 +59,9 @@ def test_torrent_engine_with_real_libtorrent(tmp_path: Path) -> None:
     assert ranked_peers == []
     assert priorities == [4]
     assert list(engine.get_handle().get_piece_priorities()) == [4]
+    assert controller_snapshot.bandwidth is not None
+    assert controller_snapshot.bandwidth.estimated_max_bandwidth == 0
+    assert controller_snapshot.bandwidth_updated is True
     assert controller_snapshot.priorities == [4]
     assert controller_snapshot.peers == []
     assert len(controller_output) == 1
