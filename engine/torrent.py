@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import libtorrent as lt
+import libtorrent as lt  # type: ignore[import-not-found]
 
 
 DEFAULT_LISTEN_INTERFACES = "0.0.0.0:6881"
@@ -54,7 +54,8 @@ class TorrentEngine:
             "ti": torrent_info,
             "save_path": str(self._download_directory),
         }
-        self._handle = self._session.add_torrent(params)
+        session = self.get_session()
+        self._handle = session.add_torrent(params)
 
     def get_status(self) -> TorrentStatus:
         if self._handle is None:

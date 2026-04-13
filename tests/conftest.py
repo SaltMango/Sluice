@@ -4,7 +4,7 @@ import importlib
 import sys
 import types
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import pytest
 
@@ -12,6 +12,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_DIST_PACKAGES = Path("/usr/lib/python3/dist-packages")
 ENGINE_MODULES = ("engine", "engine.main", "engine.peers", "engine.torrent", "torrent")
+ImportEngine = Callable[[str], types.ModuleType]
 
 
 def clear_engine_modules() -> None:
@@ -25,9 +26,9 @@ def make_libtorrent_stub() -> types.ModuleType:
     def _unconfigured(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("libtorrent stub member was used without test configuration")
 
-    module.session = _unconfigured
-    module.torrent_info = _unconfigured
-    module.peer_info = types.SimpleNamespace(remote_choked=8)
+    setattr(module, "session", _unconfigured)
+    setattr(module, "torrent_info", _unconfigured)
+    setattr(module, "peer_info", types.SimpleNamespace(remote_choked=8))
     return module
 
 
@@ -41,7 +42,7 @@ def libtorrent_stub(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleTyp
 
 
 @pytest.fixture
-def import_engine(libtorrent_stub: types.ModuleType) -> Iterator[types.ModuleType]:
+def import_engine(libtorrent_stub: types.ModuleType) -> Iterator[ImportEngine]:
     def _import(module_name: str) -> types.ModuleType:
         return importlib.import_module(module_name)
 

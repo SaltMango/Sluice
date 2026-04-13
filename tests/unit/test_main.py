@@ -4,7 +4,9 @@ import argparse
 import asyncio
 import runpy
 import sys
+from io import StringIO
 from pathlib import Path
+from typing import Any, Callable, Coroutine
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -12,37 +14,104 @@ import pytest
 from tests.conftest import REPO_ROOT, clear_engine_modules
 
 
-def test_parse_args_and_format_speed(import_engine, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_parse_args_and_format_helpers(import_engine, monkeypatch: pytest.MonkeyPatch) -> None:
     main_module = import_engine("engine.main")
     monkeypatch.setattr(sys, "argv", ["engine.main", "movie.torrent"])
 
     args = main_module.parse_args()
 
     assert args == argparse.Namespace(torrent_file="movie.torrent")
+    assert main_module.format_speed(512) == "512.0 B/s"
+    assert main_module.format_speed(2048) == "2.0 KiB/s"
+    assert main_module.format_speed(3 * 1024 * 1024 * 1024) == "3.0 GiB/s"
+    normal_snapshot = SimpleNamespace(
+        status=SimpleNamespace(progress=42.0, download_rate=2048, peers=3),
+        bandwidth=None,
+    )
+    aggressive_snapshot = SimpleNamespace(
+        status=SimpleNamespace(progress=42.0, download_rate=2048, peers=3),
+        bandwidth=SimpleNamespace(aggressive_mode=True),
+    )
+    assert main_module.format_mode(normal_snapshot) == "normal"
+    assert main_module.format_mode(aggressive_snapshot) == "aggressive"
+    assert "Progress:  42.00%" in main_module.render_snapshot(normal_snapshot)
+    assert "Speed:    2.0 KiB/s" in main_module.render_snapshot(normal_snapshot)
+    assert "Mode: normal" in main_module.render_snapshot(normal_snapshot)
+
+
+def test_build_cli_printer(import_engine) -> None:
+    main_module = import_engine("engine.main")
+    buffer = StringIO()
+    printer = main_module.build_cli_printer(buffer)
+    snapshot = SimpleNamespace(
+        status=SimpleNamespace(progress=12.5, download_rate=4096, peers=2),
+        bandwidth=SimpleNamespace(aggressive_mode=True),
+    )
+
+    printer(snapshot)
+
+    output = buffer.getvalue()
+    assert "Progress:  12.50%" in output
+    assert "Speed:    4.0 KiB/s" in output
+    assert "Peers:   2" in output
+    assert "Mode: aggressive" in output
+
+
+def test_run_cli_uses_controller_with_cli_printer(import_engine) -> None:
+    main_module = import_engine("engine.main")
+    buffer = StringIO()
+    created: dict[str, object] = {}
+
+    class FakeController:
+        def __init__(
+            self, engine: object, stats_printer: Callable[[Any], None]
+        ) -> None:
+            self.engine = engine
+            self.stats_printer = stats_printer
+            self.calls: list[str] = []
+
+        async def run(self, torrent_file: str) -> SimpleNamespace:
+            self.calls.append(torrent_file)
+            self.stats_printer(
+                SimpleNamespace(
+                    status=SimpleNamespace(progress=50.0, download_rate=1024, peers=1),
+                    bandwidth=SimpleNamespace(aggressive_mode=False),
+                )
+            )
+            return SimpleNamespace(status=SimpleNamespace(progress=100.0))
+
+    def build_fake_controller(
+        engine: object, stats_printer: Callable[[Any], None]
+    ) -> FakeController:
+        controller = FakeController(engine=engine, stats_printer=stats_printer)
+        created["controller"] = controller
+        return controller
+
+    main_module._load_runtime_dependencies = lambda: (build_fake_controller, object)
+
+    snapshot = asyncio.run(main_module.run_cli("movie.torrent", output=buffer))
+
+    assert snapshot is not None
+    controller = created["controller"]
+    assert isinstance(controller, FakeController)
+    assert controller.calls == ["movie.torrent"]
+    assert "Mode: normal" in buffer.getvalue()
 
 
 def test_main_completion_path(import_engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     main_module = import_engine("engine.main")
 
-    class FakeController:
-        def __init__(self, engine: object) -> None:
-            self.engine = engine
-            self.calls: list[str] = []
-
-        async def run(self, torrent_file: str) -> SimpleNamespace:
-            self.calls.append(torrent_file)
-            return SimpleNamespace(status=SimpleNamespace(progress=100.0))
-
-    fake_controller = FakeController(engine=object())
     monkeypatch.setattr(main_module, "parse_args", lambda: argparse.Namespace(torrent_file="movie.torrent"))
-    monkeypatch.setattr(main_module, "TorrentEngine", object)
-    monkeypatch.setattr(main_module, "Controller", lambda engine: fake_controller)
+    monkeypatch.setattr(
+        main_module,
+        "run_cli",
+        lambda torrent_file: asyncio.sleep(0, result=SimpleNamespace(status=SimpleNamespace(progress=100.0))),
+    )
 
     assert main_module.main() == 0
     output = capsys.readouterr().out
 
-    assert fake_controller.calls == ["movie.torrent"]
-    assert "Torrent added. Press Ctrl+C to stop." in output
+    assert "Starting torrent controller. Press Ctrl+C to stop." in output
     assert "Download complete." in output
     assert "Torrent monitor stopped." not in output
 
@@ -52,45 +121,29 @@ def test_main_keyboard_interrupt_path(
 ) -> None:
     main_module = import_engine("engine.main")
 
-    class FakeController:
-        def __init__(self, engine: object) -> None:
-            self.stopped = False
-
-        async def run(self, _torrent_file: str) -> SimpleNamespace:
-            return SimpleNamespace(status=SimpleNamespace(progress=100.0))
-
-        def stop(self) -> None:
-            self.stopped = True
-
     monkeypatch.setattr(main_module, "parse_args", lambda: argparse.Namespace(torrent_file="movie.torrent"))
-    monkeypatch.setattr(main_module, "TorrentEngine", object)
-    fake_controller = FakeController(engine=object())
-    monkeypatch.setattr(main_module, "Controller", lambda engine: fake_controller)
 
-    def raise_keyboard_interrupt(coroutine: object) -> object:
+    def raise_keyboard_interrupt(
+        coroutine: Coroutine[Any, Any, object]
+    ) -> object:
         coroutine.close()
         raise KeyboardInterrupt
 
     monkeypatch.setattr(main_module.asyncio, "run", raise_keyboard_interrupt)
 
     assert main_module.main() == 0
-    assert fake_controller.stopped is True
     assert "Stopping torrent monitor." in capsys.readouterr().out
 
 
 def test_main_non_complete_path(import_engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     main_module = import_engine("engine.main")
 
-    class FakeController:
-        def __init__(self, engine: object) -> None:
-            self.engine = engine
-
-        async def run(self, _torrent_file: str) -> SimpleNamespace:
-            return SimpleNamespace(status=SimpleNamespace(progress=25.0))
-
     monkeypatch.setattr(main_module, "parse_args", lambda: argparse.Namespace(torrent_file="movie.torrent"))
-    monkeypatch.setattr(main_module, "TorrentEngine", object)
-    monkeypatch.setattr(main_module, "Controller", FakeController)
+    monkeypatch.setattr(
+        main_module,
+        "run_cli",
+        lambda _torrent_file: asyncio.sleep(0, result=SimpleNamespace(status=SimpleNamespace(progress=25.0))),
+    )
 
     assert main_module.main() == 0
     assert "Torrent monitor stopped." in capsys.readouterr().out
@@ -100,19 +153,22 @@ def test_module_entrypoint_runs_main(import_engine, monkeypatch: pytest.MonkeyPa
     clear_engine_modules()
 
     class FakeController:
-        def __init__(self, engine: object) -> None:
+        def __init__(
+            self, engine: object, stats_printer: Callable[[Any], None]
+        ) -> None:
             self.engine = engine
+            self.stats_printer = stats_printer
 
         async def run(self, _file_path: str) -> SimpleNamespace:
             return SimpleNamespace(status=SimpleNamespace(progress=100.0))
 
     stub_engine_module = ModuleType("engine.torrent")
-    stub_engine_module.TorrentEngine = object
-    stub_engine_module.TorrentStatus = SimpleNamespace
+    setattr(stub_engine_module, "TorrentEngine", object)
+    setattr(stub_engine_module, "TorrentStatus", SimpleNamespace)
     monkeypatch.setitem(sys.modules, "engine.torrent", stub_engine_module)
     stub_controller_module = ModuleType("engine.controller")
-    stub_controller_module.Controller = FakeController
-    stub_controller_module.ControllerSnapshot = SimpleNamespace
+    setattr(stub_controller_module, "Controller", FakeController)
+    setattr(stub_controller_module, "ControllerSnapshot", SimpleNamespace)
     monkeypatch.setitem(sys.modules, "engine.controller", stub_controller_module)
 
     monkeypatch.setattr(sys, "argv", ["engine.main", "movie.torrent"])

@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-import libtorrent as lt
+import libtorrent as lt  # type: ignore[import-not-found]
 
 
 @dataclass(slots=True)

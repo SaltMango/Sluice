@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from types import SimpleNamespace
 
 import pytest
@@ -87,14 +88,16 @@ class FakePeerManager:
 class FakeScheduler:
     def __init__(self) -> None:
         self.score_calls: list[tuple[object, list[object]]] = []
-        self.apply_calls: list[tuple[object, list[object]]] = []
+        self.apply_calls: list[tuple[object, list[SimpleNamespace]]] = []
 
     def score_pieces(self, torrent_handle: object, peer_infos: list[object] | None = None) -> list[object]:
         peers = [] if peer_infos is None else list(peer_infos)
         self.score_calls.append((torrent_handle, peers))
         return [SimpleNamespace(index=0, priority=4), SimpleNamespace(index=1, priority=6)]
 
-    def apply_scored_pieces(self, torrent_handle: object, scored_pieces: list[object]) -> list[int]:
+    def apply_scored_pieces(
+        self, torrent_handle: Any, scored_pieces: list[SimpleNamespace]
+    ) -> list[int]:
         pieces = list(scored_pieces)
         self.apply_calls.append((torrent_handle, pieces))
         priorities = [0] * len(pieces)
@@ -330,4 +333,4 @@ def test_controller_default_stats_printer_outputs_line(
     assert "Peers:   3" in output
     assert "Ranked:   1" in output
     assert "Scheduled:   2" in output
-    assert "Mode: aggr" in output
+    assert "Mode: aggressive" in output

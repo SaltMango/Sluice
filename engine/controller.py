@@ -3,19 +3,31 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-try:
-    from .bandwidth import BandwidthOptimizer, BandwidthSnapshot
-    from .peers import PeerManager, ScoredPeer
-    from .scheduler import PieceScore, Scheduler
-    from .torrent import TorrentEngine, TorrentStatus
-except ImportError:  # pragma: no cover - convenience for direct script execution
-    from bandwidth import BandwidthOptimizer, BandwidthSnapshot
-    from peers import PeerManager, ScoredPeer
-    from scheduler import PieceScore, Scheduler
-    from torrent import TorrentEngine, TorrentStatus
+if TYPE_CHECKING:
+    from engine.bandwidth import BandwidthOptimizer, BandwidthSnapshot
+    from engine.peers import PeerManager, ScoredPeer
+    from engine.scheduler import PieceScore, Scheduler
+    from engine.torrent import TorrentEngine, TorrentStatus
+
+
+def _load_runtime_dependencies() -> tuple[type[Any], type[Any], type[Any]]:
+    try:
+        bandwidth_module = import_module("engine.bandwidth")
+        peers_module = import_module("engine.peers")
+        scheduler_module = import_module("engine.scheduler")
+    except ModuleNotFoundError:  # pragma: no cover - convenience for direct script execution
+        bandwidth_module = import_module("bandwidth")
+        peers_module = import_module("peers")
+        scheduler_module = import_module("scheduler")
+
+    bandwidth_optimizer_class = getattr(bandwidth_module, "BandwidthOptimizer")
+    peer_manager_class = getattr(peers_module, "PeerManager")
+    scheduler_class = getattr(scheduler_module, "Scheduler")
+    return bandwidth_optimizer_class, peer_manager_class, scheduler_class
 
 
 Clock = Callable[[], float]
@@ -60,10 +72,13 @@ class Controller:
         if bandwidth_interval <= 0:
             raise ValueError("bandwidth_interval must be positive.")
 
+        bandwidth_optimizer_class, peer_manager_class, scheduler_class = (
+            _load_runtime_dependencies()
+        )
         self._engine = engine
-        self._peer_manager = peer_manager or PeerManager()
-        self._scheduler = scheduler or Scheduler()
-        self._bandwidth_optimizer = bandwidth_optimizer or BandwidthOptimizer()
+        self._peer_manager = peer_manager or peer_manager_class()
+        self._scheduler = scheduler or scheduler_class()
+        self._bandwidth_optimizer = bandwidth_optimizer or bandwidth_optimizer_class()
         self._peer_interval = peer_interval
         self._scheduler_interval = scheduler_interval
         self._bandwidth_interval = bandwidth_interval
@@ -121,18 +136,21 @@ class Controller:
 
         self.start(torrent_file)
 
-        while self._running:
-            snapshot = self.tick()
+        try:
+            while self._running:
+                snapshot = self.tick()
 
-            if max_iterations is not None and snapshot.iteration >= max_iterations:
-                self.stop()
-            elif snapshot.status.progress >= 100.0:
-                self.stop()
+                if max_iterations is not None and snapshot.iteration >= max_iterations:
+                    self.stop()
+                elif snapshot.status.progress >= 100.0:
+                    self.stop()
 
-            if self._running:
-                await self._sleep(poll_interval)
+                if self._running:
+                    await self._sleep(poll_interval)
 
-        return self._last_snapshot
+            return self._last_snapshot
+        finally:
+            self.stop()
 
     def tick(self, now: float | None = None) -> ControllerSnapshot:
         if not self._started:
@@ -207,6 +225,6 @@ class Controller:
             f"Peers: {snapshot.status.peers:3d} | "
             f"Ranked: {len(snapshot.peers):3d} | "
             f"Scheduled: {len(snapshot.priorities):3d} | "
-            f"Mode: {'aggr' if snapshot.bandwidth and snapshot.bandwidth.aggressive_mode else 'norm'}"
+            f"Mode: {'aggressive' if snapshot.bandwidth and snapshot.bandwidth.aggressive_mode else 'normal'}"
         )
         print(line, end="", flush=True)
