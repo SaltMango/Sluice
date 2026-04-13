@@ -1,0 +1,26 @@
+[project]
+name = "sluice"
+version = "0.1.0"
+description = "Torrent engine experiments built on libtorrent."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+    "pytest>=9.0.0,<10.0.0",
+    "pytest-cov>=7.0.0,<8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-config --strict-markers --cov=engine --cov-report=term-missing --cov-fail-under=100"
+markers = [
+    "integration: exercises real libtorrent bindings and end-to-end wiring",
+]
+
+[tool.coverage.run]
+source = ["engine"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 100

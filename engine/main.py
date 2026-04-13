@@ -19,12 +19,12 @@ def format_speed(bytes_per_second: int) -> str:
     units = ["B/s", "KiB/s", "MiB/s", "GiB/s"]
     value = float(bytes_per_second)
 
-    for unit in units:
-        if value < 1024 or unit == units[-1]:
+    for unit in units[:-1]:
+        if value < 1024:
             return f"{value:.1f} {unit}"
         value /= 1024
 
-    return f"{value:.1f} GiB/s"
+    return f"{value:.1f} {units[-1]}"
 
 
 def main() -> int:
