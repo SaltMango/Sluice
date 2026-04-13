@@ -103,6 +103,7 @@ def test_scheduler_handles_empty_and_flat_scoring_cases(import_engine) -> None:
     scored = scheduler.score_pieces(flat_handle)
 
     assert scheduler.generate_priority_list(flat_handle) == [1, 7]
+    assert scheduler_module.Scheduler.priorities_from_scored_pieces(scored) == [1, 7]
     assert scheduler_module.Scheduler._expand_metric([9], 3) == [9, 0, 0]
     assert scheduler_module.Scheduler._collect_peer_metrics(flat_handle.get_peer_info(), 2) == ([0, 0], [0, 0])
     assert scheduler_module.Scheduler._normalize_linear([]) == []
@@ -125,3 +126,20 @@ def test_scheduler_rejects_invalid_weights(import_engine) -> None:
             peer_weight=0.0,
             speed_weight=0.0,
         )
+
+
+def test_scheduler_apply_scored_pieces(import_engine) -> None:
+    scheduler_module = import_engine("engine.scheduler")
+    scheduler = scheduler_module.Scheduler()
+
+    handle = FakeHandle(
+        piece_count=2,
+        availability=[1, 2],
+        peer_infos=[],
+    )
+    scored = [SimpleNamespace(index=0, priority=5), SimpleNamespace(index=1, priority=2)]
+
+    priorities = scheduler.apply_scored_pieces(handle, scored)
+
+    assert priorities == [5, 2]
+    assert handle.applied_priorities == [5, 2]

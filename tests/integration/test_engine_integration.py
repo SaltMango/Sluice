@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.conftest import REPO_ROOT, clear_engine_modules
 
 
-def build_test_torrent(tmp_path: Path, lt) -> Path:
+def build_test_torrent(tmp_path: Path, lt: Any) -> Path:
     payload_root = tmp_path / "payload"
     payload_root.mkdir()
     (payload_root / "hello.txt").write_text("hello world")
@@ -26,22 +26,29 @@ def build_test_torrent(tmp_path: Path, lt) -> Path:
 
 
 @pytest.mark.integration
-def test_torrent_engine_with_real_libtorrent(enable_real_libtorrent, tmp_path: Path) -> None:
+@pytest.mark.usefixtures("enable_real_libtorrent")
+def test_torrent_engine_with_real_libtorrent(tmp_path: Path) -> None:
     clear_engine_modules()
-    import libtorrent as lt
+    import libtorrent as lt  # type: ignore[import]
+    from engine.controller import Controller
     from engine.peers import PeerManager
     from engine.scheduler import Scheduler
     from engine.torrent import TorrentEngine
 
     torrent_path = build_test_torrent(tmp_path, lt)
     engine = TorrentEngine(download_directory=tmp_path / "downloads")
-    engine.start_session()
-    engine.add_torrent(torrent_path)
+    controller_output: list[object] = []
+    controller = Controller(
+        engine=engine,
+        stats_printer=controller_output.append,
+    )
+    controller.start(torrent_path)
 
     status = engine.get_status()
     peers = engine.get_peer_info()
     ranked_peers = PeerManager().collect(peers, now=10.0)
     priorities = Scheduler().apply(engine.get_handle(), peer_infos=peers)
+    controller_snapshot = controller.tick(now=10.0)
 
     assert status.name == "payload"
     assert status.progress == 0.0
@@ -52,6 +59,9 @@ def test_torrent_engine_with_real_libtorrent(enable_real_libtorrent, tmp_path: P
     assert ranked_peers == []
     assert priorities == [4]
     assert list(engine.get_handle().get_piece_priorities()) == [4]
+    assert controller_snapshot.priorities == [4]
+    assert controller_snapshot.peers == []
+    assert len(controller_output) == 1
 
 
 @pytest.mark.integration

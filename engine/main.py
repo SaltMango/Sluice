@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import time
+import asyncio
 
 try:
+    from engine.controller import Controller
     from engine.torrent import TorrentEngine
 except ModuleNotFoundError:  # pragma: no cover - convenience for direct script execution
+    from controller import Controller
     from torrent import TorrentEngine
 
 
@@ -15,44 +17,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def format_speed(bytes_per_second: int) -> str:
-    units = ["B/s", "KiB/s", "MiB/s", "GiB/s"]
-    value = float(bytes_per_second)
-
-    for unit in units[:-1]:
-        if value < 1024:
-            return f"{value:.1f} {unit}"
-        value /= 1024
-
-    return f"{value:.1f} {units[-1]}"
-
-
 def main() -> int:
     args = parse_args()
 
-    engine = TorrentEngine()
-    engine.start_session()
-    engine.add_torrent(args.torrent_file)
-
-    print("Torrent added. Press Ctrl+C to stop.")
+    controller = Controller(engine=TorrentEngine())
 
     try:
-        while True:
-            status = engine.get_status()
-            line = (
-                f"\rProgress: {status.progress:6.2f}% | "
-                f"Download: {format_speed(status.download_rate):>12} | "
-                f"Peers: {status.peers:3d}"
-            )
-            print(line, end="", flush=True)
-
-            if status.progress >= 100.0:
-                print()
-                print("Download complete.")
-                return 0
-
-            time.sleep(1)
+        print("Torrent added. Press Ctrl+C to stop.")
+        snapshot = asyncio.run(controller.run(args.torrent_file))
+        print()
+        if snapshot is not None and snapshot.status.progress >= 100.0:
+            print("Download complete.")
+        else:
+            print("Torrent monitor stopped.")
+        return 0
     except KeyboardInterrupt:
+        controller.stop()
         print("\nStopping torrent monitor.")
         return 0
 

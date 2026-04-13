@@ -103,19 +103,28 @@ class Scheduler:
         peer_infos: Sequence[Any] | None = None,
     ) -> list[int]:
         scored_pieces = self.score_pieces(torrent_handle=torrent_handle, peer_infos=peer_infos)
-        priorities = [0] * len(scored_pieces)
-        for piece in scored_pieces:
-            priorities[piece.index] = piece.priority
-        return priorities
+        return self.priorities_from_scored_pieces(scored_pieces)
 
     def apply(self, torrent_handle: Any, peer_infos: Sequence[Any] | None = None) -> list[int]:
         priorities = self.generate_priority_list(torrent_handle=torrent_handle, peer_infos=peer_infos)
         torrent_handle.prioritize_pieces(priorities)
         return priorities
 
+    def apply_scored_pieces(self, torrent_handle: Any, scored_pieces: Sequence[PieceScore]) -> list[int]:
+        priorities = self.priorities_from_scored_pieces(scored_pieces)
+        torrent_handle.prioritize_pieces(priorities)
+        return priorities
+
     @staticmethod
     def _piece_count(torrent_handle: Any) -> int:
         return int(torrent_handle.torrent_file().num_pieces())
+
+    @staticmethod
+    def priorities_from_scored_pieces(scored_pieces: Sequence[PieceScore]) -> list[int]:
+        priorities = [0] * len(scored_pieces)
+        for piece in scored_pieces:
+            priorities[piece.index] = piece.priority
+        return priorities
 
     @staticmethod
     def _expand_metric(values: Sequence[int], size: int) -> list[int]:

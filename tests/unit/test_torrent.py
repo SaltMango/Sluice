@@ -33,6 +33,8 @@ def test_package_exports(import_engine) -> None:
     engine_package = import_engine("engine")
 
     assert engine_package.__all__ == [
+        "Controller",
+        "ControllerSnapshot",
         "PeerManager",
         "PeerSnapshot",
         "PieceScore",
