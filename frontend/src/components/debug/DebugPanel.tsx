@@ -25,11 +25,15 @@ export function DebugPanel() {
     const health = g.health;
     const sched = displayStats.scheduler;
 
-    // Aggregate fast/slow across all torrents
-    let totalFast = 0, totalSlow = 0, totalActive = 0;
+    // Aggregate fast/normal/idle across all torrents
+    let totalFast = 0, totalNormal = 0, totalIdle = 0, totalActive = 0;
     for (const t of displayStats.torrents ?? []) {
-      totalFast  += t.metrics?.peers?.fast  ?? 0;
-      totalSlow  += t.metrics?.peers?.slow  ?? 0;
+      const fast   = t.metrics?.peers?.fast    ?? 0;
+      const active = t.metrics?.peers?.active  ?? 0;
+      const slow   = t.metrics?.peers?.slow    ?? 0;
+      totalFast   += fast;
+      totalNormal += Math.max(0, active - fast);
+      totalIdle   += slow;
       totalActive += t.metrics?.pieces?.active ?? 0;
     }
 
@@ -38,7 +42,8 @@ export function DebugPanel() {
       active_pieces: totalActive,
       average_peer_speed: speed?.avg_10s ?? g.total_speed_down / Math.max(g.total_peers, 1),
       fast_peers: totalFast,
-      slow_peers: totalSlow,
+      normal_peers: totalNormal,
+      idle_peers: totalIdle,
       bandwidth_utilization_percent: (health?.bandwidth_utilization ?? 0) * 100,
     };
   }, [displayStats]);
@@ -88,11 +93,13 @@ export function DebugPanel() {
         </div>
 
         <div className="debug-row">
-          <span>Fast vs Slow Peers</span>
+          <span>Peers</span>
           <span className="debug-value">
-            <span style={{color: 'var(--status-completed)'}}>{flat.fast_peers}</span>
-            {' / '}
-            <span style={{color: 'var(--status-paused)'}}>{flat.slow_peers}</span>
+            <span style={{color: 'var(--status-completed)'}} title="Fast: top-25% speed">{flat.fast_peers}F</span>
+            {' · '}
+            <span style={{color: 'var(--status-downloading)'}} title="Normal: active, not top-25%">{flat.normal_peers}N</span>
+            {' · '}
+            <span style={{color: 'var(--text-tertiary)'}} title="Idle: zero transfer speed">{flat.idle_peers}I</span>
           </span>
         </div>
 

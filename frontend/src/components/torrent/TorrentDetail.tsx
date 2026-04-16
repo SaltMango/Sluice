@@ -25,7 +25,7 @@ function pct(v: number): string {
 
 // ── Sub-components (memoised) ─────────────────────────────────────────────────
 
-// SVG Sparkline — only re-renders when history array reference changes
+// SVG Sparkline — smooth cubic bezier curve, memoised
 const SpeedSparkline = memo(({ history, avg, peak, current }: {
   history: number[];
   avg: number;
@@ -33,31 +33,39 @@ const SpeedSparkline = memo(({ history, avg, peak, current }: {
   current: number;
 }) => {
   const W = 320, H = 80;
-  const pts = useMemo(() => {
-    if (!history || history.length < 2) return "";
-    const maxV = Math.max(...history, 1);
-    return history
-      .map((v, i) => {
-        const x = (i / (history.length - 1)) * W;
-        const y = H - (v / maxV) * (H - 8) - 4;
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      })
-      .join(" ");
+
+  // EMA smoothing so visual noise is suppressed (α=0.25 → strong smoothing)
+  const smoothed = useMemo(() => {
+    if (!history || history.length < 2) return history ?? [];
+    const α = 0.25;
+    const out: number[] = [history[0]];
+    for (let i = 1; i < history.length; i++) {
+      out.push(α * history[i] + (1 - α) * out[i - 1]);
+    }
+    return out;
   }, [history]);
 
-  const areaPath = useMemo(() => {
-    if (!history || history.length < 2) return "";
-    const maxV = Math.max(...history, 1);
-    const points = history.map((v, i) => ({
-      x: (i / (history.length - 1)) * W,
-      y: H - (v / maxV) * (H - 8) - 4,
+  // Build a smooth SVG `path` using cubic bezier control points
+  const linePath = useMemo(() => {
+    if (smoothed.length < 2) return "";
+    const maxV = Math.max(...smoothed, 1);
+    const pts = smoothed.map((v, i) => ({
+      x: (i / (smoothed.length - 1)) * W,
+      y: H - (v / maxV) * (H - 12) - 4,
     }));
-    return (
-      `M ${points[0].x.toFixed(1)},${H} ` +
-      points.map(p => `L ${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ") +
-      ` L ${points[points.length - 1].x.toFixed(1)},${H} Z`
-    );
-  }, [history]);
+
+    let d = `M ${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
+    for (let i = 1; i < pts.length; i++) {
+      const cp1x = pts[i - 1].x + (pts[i].x - pts[i - 1].x) / 3;
+      const cp2x = pts[i - 1].x + (2 * (pts[i].x - pts[i - 1].x)) / 3;
+      d += ` C ${cp1x.toFixed(1)},${pts[i - 1].y.toFixed(1)} ${cp2x.toFixed(1)},${pts[i].y.toFixed(1)} ${pts[i].x.toFixed(1)},${pts[i].y.toFixed(1)}`;
+    }
+    return d;
+  }, [smoothed]);
+
+  const areaPath = linePath
+    ? `${linePath} L ${W},${H} L 0,${H} Z`
+    : "";
 
   return (
     <div className="sparkline-container">
@@ -72,16 +80,16 @@ const SpeedSparkline = memo(({ history, avg, peak, current }: {
       <svg className="sparkline-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
         <defs>
           <linearGradient id="sparkGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--status-downloading)" stopOpacity="0.3" />
-            <stop offset="100%" stopColor="var(--status-downloading)" stopOpacity="0" />
+            <stop offset="0%"   stopColor="var(--status-downloading)" stopOpacity="0.28" />
+            <stop offset="100%" stopColor="var(--status-downloading)" stopOpacity="0"   />
           </linearGradient>
         </defs>
         {areaPath && (
           <path d={areaPath} fill="url(#sparkGrad)" />
         )}
-        {pts && (
-          <polyline
-            points={pts}
+        {linePath && (
+          <path
+            d={linePath}
             fill="none"
             stroke="var(--status-downloading)"
             strokeWidth="2"
@@ -113,12 +121,15 @@ const SpeedSparkline = memo(({ history, avg, peak, current }: {
   );
 });
 
+
 // Peer quality stacked bar
 const PeerBar = memo(({ peers }: { peers: TorrentMetrics["peers"] }) => {
   const total = Math.max(peers.total, 1);
-  const fastPct  = (peers.fast / total) * 100;
-  const activePct = Math.max(0, ((peers.active - peers.fast) / total) * 100);
-  const slowPct  = (peers.slow / total) * 100;
+  const normalCount = Math.max(0, peers.active - peers.fast);
+  
+  const fastPct   = (peers.fast / total) * 100;
+  const normalPct = (normalCount / total) * 100;
+  const idlePct   = (peers.slow / total) * 100;
 
   return (
     <div className="peer-bar-container">
@@ -131,14 +142,16 @@ const PeerBar = memo(({ peers }: { peers: TorrentMetrics["peers"] }) => {
           <div className="metric-card-value" style={{ color: "var(--text-secondary)", fontSize: "0.85rem" }}>
             {formatSpeed(peers.avg_speed)} avg
           </div>
-          <div className="metric-card-sub">threshold: {formatSpeed(peers.fast_threshold)}</div>
+          {peers.fast_threshold > 0 && (
+            <div className="metric-card-sub">fast ≥ {formatSpeed(peers.fast_threshold)}</div>
+          )}
         </div>
       </div>
 
       <div className="peer-bar-track">
-        <div className="peer-bar-segment peer-seg-fast"  style={{ width: `${fastPct}%` }} />
-        <div className="peer-bar-segment peer-seg-active" style={{ width: `${activePct}%` }} />
-        <div className="peer-bar-segment peer-seg-slow"  style={{ width: `${slowPct}%` }} />
+        <div className="peer-bar-segment peer-seg-fast"   title={`Fast (${peers.fast})`} style={{ width: `${fastPct}%` }} />
+        <div className="peer-bar-segment peer-seg-active" title={`Normal (${normalCount})`} style={{ width: `${normalPct}%` }} />
+        <div className="peer-bar-segment peer-seg-slow"   title={`Idle (${peers.slow})`} style={{ width: `${idlePct}%` }} />
       </div>
 
       <div className="peer-bar-legend">
@@ -148,11 +161,11 @@ const PeerBar = memo(({ peers }: { peers: TorrentMetrics["peers"] }) => {
         </div>
         <div className="peer-legend-item">
           <div className="peer-legend-dot" style={{ background: "var(--status-downloading)" }} />
-          Active ({peers.active})
+          Normal ({normalCount})
         </div>
         <div className="peer-legend-item">
           <div className="peer-legend-dot" style={{ background: "rgba(255,255,255,0.15)" }} />
-          Slow ({peers.slow})
+          Idle ({peers.slow})
         </div>
         <div className="peer-legend-item" style={{ marginLeft: "auto" }}>
           Seeds: {peers.seeds}

@@ -3,6 +3,41 @@ import { formatBytes, formatSpeed, formatTime } from "../../utils/format";
 import { useTorrentStore } from "../../store/useTorrentStore";
 import type { TorrentItem } from "../../types/api";
 
+// ── Tune Level Badge ──────────────────────────────────────────────────────────
+
+const TUNE_CONFIG: Record<number, { label: string; color: string; bg: string; tip: string }> = {
+  0: { label: "SAFE", color: "#22c55e", bg: "rgba(34,197,94,0.12)",  tip: "Conservative — fewer connections, maximum stability" },
+  1: { label: "BAL",  color: "#3b82f6", bg: "rgba(59,130,246,0.12)", tip: "Balanced — moderate speed, good stability" },
+  2: { label: "AGG",  color: "#f97316", bg: "rgba(249,115,22,0.12)", tip: "Aggressive — high speed, less stable" },
+  3: { label: "EXT",  color: "#ef4444", bg: "rgba(239,68,68,0.12)",  tip: "Extreme — max connections, may stress peers" },
+};
+
+const TuneBadge: React.FC<{ level?: number }> = ({ level = 1 }) => {
+  const cfg = TUNE_CONFIG[level] ?? TUNE_CONFIG[1];
+  return (
+    <span
+      title={cfg.tip}
+      style={{
+        display: "inline-block",
+        padding: "2px 7px",
+        borderRadius: "4px",
+        fontSize: "0.72rem",
+        fontWeight: 700,
+        letterSpacing: "0.04em",
+        color: cfg.color,
+        backgroundColor: cfg.bg,
+        border: `1px solid ${cfg.color}44`,
+        cursor: "help",
+        userSelect: "none",
+      }}
+    >
+      {cfg.label}
+    </span>
+  );
+};
+
+// ── Torrent Row ───────────────────────────────────────────────────────────────
+
 const TorrentRow: React.FC<{ torrent: TorrentItem, onClick: () => void }> = ({ torrent, onClick }) => {
   const { pauseTorrent, resumeTorrent, removeTorrent } = useTorrentStore();
   const percent = (torrent.progress * 100).toFixed(1);
@@ -36,9 +71,7 @@ const TorrentRow: React.FC<{ torrent: TorrentItem, onClick: () => void }> = ({ t
       <td>{torrent.download_speed > 0 ? formatSpeed(torrent.download_speed) : "-"}</td>
       <td>{torrent.upload_speed > 0 ? formatSpeed(torrent.upload_speed) : "-"}</td>
       <td>{torrent.peers} / {torrent.seeds}</td>
-      <td style={torrent.tune_level && torrent.tune_level > 1 ? {color: 'var(--status-error)', fontWeight: 500} : {}}>
-        Lvl {torrent.tune_level ?? 0}
-      </td>
+      <td><TuneBadge level={torrent.tune_level ?? 1} /></td>
       <td>{torrent.download_speed > 0 || torrent.upload_speed > 0 ? 'Yes' : 'No'}</td>
       <td>{torrent.status === 'downloading' ? formatTime(torrent.eta) : "-"}</td>
       <td>

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Sequence
+from typing import Sequence, Any
 
 from engine.config import SchedulerConfig
-from engine.models import PieceInfo, PeerInfo, PieceScore, PriorityBucket, PieceState
+from engine.models import PieceInfo, PeerInfo, PieceScore, PriorityBucket, PieceState, TuneLevel
 from engine.utils import normalize_linear, normalize_inverse
 
 class Scheduler:
@@ -29,20 +29,31 @@ class Scheduler:
         self._speed_weight = self.config.speed_weight / total_weight
         
         self._random = random.Random(self.config.seed)
-        self._ticks = 0
-        self._last_priorities: list[PieceScore] = []
-        self.last_metrics: dict[str, float | int] = {}
+        self._ticks: dict[str, int] = {}
+        self._last_priorities: dict[str, list[PieceScore]] = {}
+        self.last_metrics: dict[str, dict[str, float | int | dict]] = {}
 
-    def score_pieces(self, pieces: Sequence[PieceInfo], peers: Sequence[PeerInfo]) -> list[PieceScore]:
+    def _get_tune_weights(self, tune_level: TuneLevel) -> tuple[float, float, float, float]:
+        if tune_level == TuneLevel.SAFE:
+            return 0.50, 0.20, 0.20, 0.10
+        elif tune_level == TuneLevel.AGGRESSIVE:
+            return 0.20, 0.20, 0.15, 0.45
+        elif tune_level == TuneLevel.EXTREME:
+            return 0.10, 0.15, 0.15, 0.60
+        # BALANCED or default
+        return 0.35, 0.20, 0.25, 0.20
+
+    def score_pieces(self, t_id: str, tune_level: TuneLevel, pieces: Sequence[PieceInfo], peers: Sequence[PeerInfo]) -> list[PieceScore]:
         piece_count = len(pieces)
         if piece_count == 0:
             return []
 
-        self._ticks += 1
+        self._ticks[t_id] = self._ticks.get(t_id, 0) + 1
         
         # Stability Damping
-        if self._last_priorities and self._ticks % max(1, self.config.min_cycles_before_reprioritize) != 0:
-            return self._last_priorities
+        last_priorities = self._last_priorities.get(t_id)
+        if last_priorities and self._ticks[t_id] % max(1, self.config.min_cycles_before_reprioritize) != 0:
+            return last_priorities
             
         peer_availability = [0] * piece_count
         peer_speed = [0] * piece_count
@@ -62,6 +73,7 @@ class Scheduler:
         else:
              noise = [0.0] * piece_count
 
+        availabilities = [p.availability for p in pieces]
         rarity_values = [v + n for v, n in zip(normalize_inverse(availabilities), noise)]
         position_values = self._build_position_values(piece_count)
         peer_availability_values = normalize_linear(peer_availability)
@@ -69,41 +81,46 @@ class Scheduler:
         peer_speed_scaled = [math.sqrt(s) for s in peer_speed]
         peer_speed_values = normalize_linear(peer_speed_scaled)
 
+        # ── Apply adaptive weights from TuneLevel ─────────────────────────────
+        r_w, pos_w, peer_w, s_w = self._get_tune_weights(tune_level)
+
         total_speed = sum(max(p.download_speed, 0) for p in peers)
-        self.last_metrics = {
+        metrics: dict[str, Any] = {
             "swarm_speed_computed": total_speed,
             "pieces_scored": 0,
             "rare_pieces_boosted": 0,
             "high_priority_count": 0,
             "average_score": 0.0,
+            "applied_weights": {"rarity": r_w, "position": pos_w, "peer": peer_w, "speed": s_w},
         }
+        self.last_metrics[t_id] = metrics
 
         # Dynamically balance speed weight in high bandwidth environments
-        current_speed_weight = self._speed_weight
+        current_speed_weight = s_w
         if total_speed > 10 * 1024 * 1024:  # > 10 MB/s
             current_speed_weight *= 1.2
 
         raw_scores: list[float] = []
         for i, p in enumerate(pieces):
-            if p.is_complete or p.state != PieceState.AVAILABLE:
+            if p.is_complete or p.state == PieceState.COMPLETE:
                 raw_scores.append(0.0)
                 continue
 
-            self.last_metrics["pieces_scored"] += 1
+            metrics["pieces_scored"] += 1
             raw_scores.append(
-                rarity_values[i] * self._rarity_weight
-                + position_values[i] * self._position_weight
-                + peer_availability_values[i] * self._peer_weight
+                rarity_values[i] * r_w
+                + position_values[i] * pos_w
+                + peer_availability_values[i] * peer_w
                 + peer_speed_values[i] * current_speed_weight
             )
 
-        pieces_scored = self.last_metrics["pieces_scored"]
+        pieces_scored = metrics["pieces_scored"]
         # Cast required for strict typing checks because dict is mixed values
         assert isinstance(pieces_scored, int)
         if pieces_scored > 0:
-            self.last_metrics["average_score"] = float(sum(raw_scores) / pieces_scored)
+            metrics["average_score"] = float(sum(raw_scores) / pieces_scored)
 
-        priorities = self._build_priority_buckets(raw_scores, pieces)
+        priorities = self._build_priority_buckets(raw_scores, pieces, metrics)
 
         scored_pieces = [
             PieceScore(
@@ -117,7 +134,7 @@ class Scheduler:
         ]
         
         sorted_pieces = sorted(scored_pieces, key=lambda p: (p.priority.value, p.score), reverse=True)
-        self._last_priorities = sorted_pieces
+        self._last_priorities[t_id] = sorted_pieces
         return sorted_pieces
 
     def _build_position_values(self, piece_count: int) -> list[float]:
@@ -129,7 +146,7 @@ class Scheduler:
         divisor = piece_count - 1
         return [1.0 - (index / divisor) for index in range(piece_count)]
 
-    def _build_priority_buckets(self, scores: Sequence[float], pieces: Sequence[PieceInfo]) -> list[PriorityBucket]:
+    def _build_priority_buckets(self, scores: Sequence[float], pieces: Sequence[PieceInfo], metrics: dict[str, float | int]) -> list[PriorityBucket]:
         incomplete_scores = [s for i, s in enumerate(scores) if not pieces[i].is_complete and pieces[i].state != PieceState.COMPLETE]
         
         if not incomplete_scores:
@@ -185,7 +202,7 @@ class Scheduler:
             else:
                 buckets.append(PriorityBucket.LOW)
 
-        self.last_metrics["rare_pieces_boosted"] = rarest_boosted_count
-        self.last_metrics["high_priority_count"] = high_count
+        metrics["rare_pieces_boosted"] = rarest_boosted_count
+        metrics["high_priority_count"] = high_count
 
         return buckets

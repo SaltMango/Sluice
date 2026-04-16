@@ -32,8 +32,6 @@ export interface GlobalStats {
   global_speed_up: number;
   total_peers: number;
   active_torrents: number;
-  aggressive_mode?: boolean;
-  aggression_level?: number;
 }
 
 // ── Metric sub-types ─────────────────────────────────────────────────────────

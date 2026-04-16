@@ -77,11 +77,4 @@ export const engineApi = {
 
   getDownloadsPath: () =>
     fetchApi<{ downloads_path: string }>("/fs/downloads-path"),
-
-  toggleAggressiveMode: (aggressive_mode: boolean) =>
-    fetchApi("/mode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ aggressive_mode }),
-    }),
 };

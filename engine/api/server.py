@@ -17,6 +17,7 @@ from engine.api.models import (
     ApiResponse, TorrentItem, TorrentStatus,
     MagnetAddRequest, UrlAddRequest
 )
+from engine.models import TuneLevel
 
 class MkdirRequest(BaseModel):
     path: str
@@ -128,6 +129,7 @@ def map_state_to_item(state: TorrentState) -> TorrentItem:
         downloaded=state.total_downloaded,
         added_at=int(state.added_at),
         save_path=state.save_path,
+        tune_level=int(state.tune_level),   # single source of truth
     )
 
 # ── Torrent CRUD ──────────────────────────────────────────────────────────────
@@ -330,15 +332,11 @@ async def get_stats():
     global_down = sum(s.download_speed for s in states)
     global_up = sum(s.upload_speed for s in states)
     total_peers = sum(s.peers_connected for s in states)
-    current_aggression = getattr(controller.bandwidth_optimizer, "_aggression_level", 0)
-
     return ApiResponse(success=True, data={
         "global_speed_down": global_down,
         "global_speed_up": global_up,
         "total_peers": total_peers,
         "active_torrents": active,
-        "aggressive_mode": current_aggression > 0,
-        "aggression_level": current_aggression,
     })
 
 # ── Debug endpoint (GLOBAL scope + per-torrent breakdown) ─────────────────────
@@ -372,17 +370,35 @@ async def get_debug_stats(
         "total_peers": total_peers,
     }
 
-    if want("speed"):
-        m = controller.metrics.speed
-        global_data["speed"] = {
-            "avg_10s": round(m.rolling_avg(), 0),
-            "peak": round(m._peak, 0),
-            "current": float(m._current),
-            "history": list(m._history),
-        }
+    # Pick the fastest active torrent's collector for global speed/health/time.
+    # Falls back to zero-values when no torrents have been seen yet.
+    _all_mc = list(controller._metrics.values())
+    _primary_mc = max(_all_mc, key=lambda mc: mc.speed._current, default=None)
 
-    if want("health"):
-        metrics_obj = controller.metrics.speed.build_health_metrics(
+    if want("speed") and _primary_mc:
+        m = _primary_mc.speed
+        # Build an aggregated history by summing speeds across all per-torrent collectors
+        if len(_all_mc) > 1:
+            histories = [list(mc.speed._history) for mc in _all_mc]
+            max_len = max(len(h) for h in histories)
+            agg_history = [
+                sum(h[i] if i < len(h) else 0 for h in histories)
+                for i in range(max_len)
+            ]
+        else:
+            agg_history = list(m._history)
+
+        global_data["speed"] = {
+            "avg_10s": round(sum(mc.speed.rolling_avg() for mc in _all_mc), 0),
+            "peak": round(sum(mc.speed._peak for mc in _all_mc), 0),
+            "current": float(sum(mc.speed._current for mc in _all_mc)),
+            "history": agg_history,
+        }
+    elif want("speed"):
+        global_data["speed"] = {"avg_10s": 0, "peak": 0, "current": 0, "history": []}
+
+    if want("health") and _primary_mc:
+        metrics_obj = _primary_mc.speed.build_health_metrics(
             bw_utilization=sum(controller._last_bw_utilization.values()) / max(len(states), 1)
         )
         global_data["health"] = {
@@ -392,14 +408,18 @@ async def get_debug_stats(
             "stall_events": metrics_obj.stall_events,
             "stall_time": metrics_obj.stall_time,
         }
+    elif want("health"):
+        global_data["health"] = {"efficiency": 0, "stability": 0, "bandwidth_utilization": 0, "stall_events": 0, "stall_time": 0}
 
-    if want("time"):
-        time_m = controller.metrics.speed.build_time_metrics()
+    if want("time") and _primary_mc:
+        time_m = _primary_mc.speed.build_time_metrics()
         global_data["time"] = {
             "ttfb": time_m.ttfb,
             "t50": time_m.t50,
             "session_uptime": time_m.session_uptime,
         }
+    elif want("time"):
+        global_data["time"] = {"ttfb": -1, "t50": -1, "session_uptime": 0}
 
     # ── Per-torrent breakdown ─────────────────────────────────────────────
     torrents_data = []
@@ -433,14 +453,37 @@ async def get_debug_stats(
         } if want("scheduler") else {},
     })
 
-# ── Mode toggle ────────────────────────────────────────────────────────────────
+# ── Per-torrent tuning debug ───────────────────────────────────────────────────
 
-class ModeToggleRequest(BaseModel):
-    aggressive_mode: bool
+@app.get("/api/debug/tuning", response_model=ApiResponse)
+async def get_tuning_debug(id: Optional[str] = Query(default=None, description="Torrent ID (omit for all)")):
+    """
+    Returns the live adaptive-tuning snapshot for one or all torrents.
 
-@app.post("/api/mode", response_model=ApiResponse)
-async def toggle_mode(req: ModeToggleRequest):
-    return ApiResponse(success=True, data={"aggressive_mode": req.aggressive_mode})
+    Example (single torrent):
+      GET /api/debug/tuning?id=abc123
+
+    Response:
+      {
+        "torrent_id": "abc123",
+        "tune_level": "AGGRESSIVE",
+        "previous_level": "BALANCED",
+        "timestamp": 1710000000,
+        "metrics": { "utilization": 0.72, "stalls": 0, "peers": 80, ... },
+        "decision": "low utilization → increase aggression"
+      }
+    """
+    if id:
+        debug = controller.get_tune_debug(id)
+        if debug is None:
+            return JSONResponse(status_code=404, content={"success": False, "error": "Torrent not found"})
+        return ApiResponse(success=True, data=debug)
+    # All torrents
+    all_debug = [
+        controller.get_tune_debug(t_id)
+        for t_id in controller.get_all_states()
+    ]
+    return ApiResponse(success=True, data={"torrents": [d for d in all_debug if d is not None]})
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 

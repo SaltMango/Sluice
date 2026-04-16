@@ -14,7 +14,6 @@ interface TorrentStore {
   pauseTorrent: (id: string) => Promise<void>;
   resumeTorrent: (id: string) => Promise<void>;
   removeTorrent: (id: string) => Promise<void>;
-  toggleAggressiveMode: (mode: boolean) => Promise<void>;
 }
 
 export const useTorrentStore = create<TorrentStore>((set, get) => ({
@@ -24,7 +23,6 @@ export const useTorrentStore = create<TorrentStore>((set, get) => ({
     global_speed_up: 0,
     total_peers: 0,
     active_torrents: 0,
-    aggressive_mode: false,
   },
   debugStats: null,
   isLoading: true,
@@ -85,15 +83,6 @@ export const useTorrentStore = create<TorrentStore>((set, get) => ({
       torrents: state.torrents.filter(t => t.id !== id)
     }));
     await engineApi.removeTorrent(id);
-    await get().fetchData();
-  },
-
-  toggleAggressiveMode: async (mode: boolean) => {
-    // Optimistic update
-    set((state) => ({
-      stats: { ...state.stats, aggressive_mode: mode }
-    }));
-    await engineApi.toggleAggressiveMode(mode);
     await get().fetchData();
   }
 }));

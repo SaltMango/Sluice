@@ -103,6 +103,8 @@ class TorrentEngine:
             raise TorrentError(f"No active torrent handle for {t_id}")
             
         status = handle.status()
+        state_str = "paused" if status.paused else str(status.state)
+        
         return TorrentState(
             id=t_id,
             name=status.name,
@@ -112,7 +114,7 @@ class TorrentEngine:
             upload_speed=status.upload_rate,
             peers_connected=status.num_peers,
             seeds_connected=status.num_seeds,
-            state_str=str(status.state),
+            state_str=state_str,
             total_size=status.total_wanted,
             total_downloaded=status.total_wanted_done,
             added_at=self._added_times.get(t_id, 0.0)

@@ -1,6 +1,14 @@
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, IntEnum
 from typing import Set
+
+class TuneLevel(IntEnum):
+    """Per-torrent adaptive tuning aggressiveness level."""
+    SAFE       = 0
+    BALANCED   = 1
+    AGGRESSIVE = 2
+    EXTREME    = 3
+
 
 class PieceState(Enum):
     """Represents the lifecycle of a single piece in the torrent."""
@@ -50,6 +58,8 @@ class TorrentState:
     total_size: int
     total_downloaded: int
     added_at: float
+    tune_level: TuneLevel = TuneLevel.BALANCED
+    last_tune_change: float = 0.0
 
 @dataclass(slots=True)
 class ScoredPeer:

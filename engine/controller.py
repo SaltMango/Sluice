@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from engine.config import EngineConfig
-from engine.models import TorrentState, PieceState, PriorityBucket, PeerInfo
+from engine.models import TorrentState, PieceState, PriorityBucket, PeerInfo, TuneLevel
 from engine.exceptions import EngineError
 from engine.logger import get_logger
 from engine.events import EventBus
@@ -16,6 +16,7 @@ from engine.bandwidth import BandwidthOptimizer
 from engine.peers import PeerManager
 from engine.scheduler import Scheduler
 from engine.torrent import TorrentEngine
+from engine.tuning import TuneEvaluator, apply_tune
 
 logger = get_logger(__name__)
 
@@ -32,7 +33,8 @@ class Controller:
         self.bandwidth_optimizer = BandwidthOptimizer(self.config.bandwidth)
 
         self.event_bus = EventBus()
-        self.metrics = MetricsCollector()
+        self._metrics: dict[str, MetricsCollector] = {}   # one per torrent
+        self.tune_evaluator = TuneEvaluator()
 
         self._running = False
         self._started = False
@@ -45,6 +47,10 @@ class Controller:
         self._last_completed_pieces: dict[str, int] = {}
         self._last_bw_utilization: dict[str, float] = {}
         self._piece_count_start: dict[str, float] = {}  # when we first saw this torrent
+
+        # ── Per-torrent tuning debug cache (keyed by t_id) ───────────────────
+        self._last_tune_metrics: dict[str, dict] = {}
+        self._last_tune_reason: dict[str, str] = {}
 
         # Interval timestamps
         self._last_peer_update_at: float | None = None
@@ -62,8 +68,7 @@ class Controller:
         self._started = True
 
         configured_bw = getattr(self.config.bandwidth, "configured_max_bandwidth", None) or 0
-        self.metrics.set_configured_max_bandwidth(int(configured_bw))
-        self._last_save_resume_at = time.monotonic()
+        self._configured_bw = int(configured_bw)
 
         logger.info("Controller loop started")
         asyncio.create_task(self.event_bus.publish("controller_started", {}))
@@ -113,10 +118,14 @@ class Controller:
         if "_start_time" not in piece_counts:
             piece_counts["_start_time"] = self._piece_count_start.get(t_id, time.monotonic())
 
-        return self.metrics.build_torrent_metrics(
+        mc = self._metrics.get(t_id)
+        if mc is None:
+            return None
+
+        return mc.build_torrent_metrics(
             peers=self.get_cached_peers(t_id),
             piece_counts=piece_counts,
-            scheduler_last=dict(self.scheduler.last_metrics),
+            scheduler_last=dict(self.scheduler.last_metrics.get(t_id, {})),
             scheduler_config=self.config.scheduler,
             completed_pieces=self._last_completed_pieces.get(t_id, 0),
             bw_utilization=self._last_bw_utilization.get(t_id, 0.0),
@@ -137,12 +146,39 @@ class Controller:
 
                     # State snapshot
                     state = self.engine.get_state(t_id)
+
+                    # ── Optimization: Skip subsystems if paused ───
+                    if state.state_str == "paused":
+                        # We still update state and record 0 speed, but skip intensive stuff
+                        self._last_states[t_id] = state
+                        if t_id in self._metrics:
+                            self._metrics[t_id].record_speed(0)
+                        continue
+
+                    # ── Restore tune state (single source of truth) ───────────
+                    # engine.get_state() constructs a fresh TorrentState each
+                    # tick with tune_level defaulting to BALANCED.  Carry over
+                    # the level we last committed so the evaluator's cooldown
+                    # and hysteresis logic sees stable history.
+                    prev = self._last_states.get(t_id)
+                    if prev is not None:
+                        state.tune_level = prev.tune_level
+                        state.last_tune_change = prev.last_tune_change
+
                     self._last_states[t_id] = state
 
+                    # ── Per-torrent MetricsCollector bootstrap ────────────────
+                    if t_id not in self._metrics:
+                        mc = MetricsCollector()
+                        mc.set_configured_max_bandwidth(self._configured_bw)
+                        self._metrics[t_id] = mc
+                    else:
+                        mc = self._metrics[t_id]
+
                     # Speed + milestones
-                    self.metrics.record_speed(state.download_speed)
+                    mc.record_speed(state.download_speed)
                     if state.progress >= 50.0:
-                        self.metrics.notify_50pct(t_id)
+                        mc.notify_50pct(t_id)
 
                     # Bandwidth utilization (cheap to compute every tick)
                     configured_bw = getattr(self.config.bandwidth, "configured_max_bandwidth", None) or 0
@@ -151,7 +187,7 @@ class Controller:
                         bw_util = min(1.0, current_speed / configured_bw)
                     else:
                         # Fall back to fraction of peak observed
-                        peak = self.metrics.speed._peak
+                        peak = mc.speed._peak
                         bw_util = min(1.0, current_speed / peak) if peak > 0 else 0.0
                     self._last_bw_utilization[t_id] = bw_util
 
@@ -172,7 +208,7 @@ class Controller:
                         peers = self.engine.get_peers(t_id, active_time=now)
                         self._last_peers[t_id] = peers  # freshen cache
 
-                        scored_pieces = self.scheduler.score_pieces(pieces, peers)
+                        scored_pieces = self.scheduler.score_pieces(t_id, state.tune_level, pieces, peers)
 
                         priorities = [0] * len(pieces)
                         completed_count = 0
@@ -180,7 +216,7 @@ class Controller:
                             priorities[sp.info.index] = sp.priority.value
                             if sp.info.is_complete:
                                 completed_count += 1
-                                self.metrics.record_piece_complete()
+                                mc.record_piece_complete()
 
                         self.engine.apply_priorities(t_id, priorities)
                         self._last_completed_pieces[t_id] = completed_count
@@ -224,6 +260,31 @@ class Controller:
                         self.engine.apply_session_settings(tuned)
                         self._last_bandwidth_update_at = now
 
+                    # ── Per-torrent tuning sub-system ─────────────────────────
+                    tune_metrics = self._collect_tune_metrics(t_id, state, bw_util)
+                    new_level, reason = self.tune_evaluator.evaluate(state, tune_metrics)
+                    self._last_tune_metrics[t_id] = tune_metrics
+                    self._last_tune_reason[t_id] = reason
+
+                    if new_level != state.tune_level:
+                        handle = self.engine._handles.get(t_id)
+                        if handle:
+                            apply_tune(handle, new_level)
+                        old_level = state.tune_level
+                        state.tune_level = new_level
+                        state.last_tune_change = now
+                        logger.info(
+                            "tune_change",
+                            extra={
+                                "torrent": t_id,
+                                "old": old_level.name,
+                                "new": new_level.name,
+                                "reason": reason,
+                                "util": round(tune_metrics["utilization"], 3),
+                                "stalls": tune_metrics["stalls"],
+                            },
+                        )
+
                 except EngineError as e:
                     logger.warning(f"Engine iteration error on {t_id}: {e}")
 
@@ -258,6 +319,23 @@ class Controller:
                 self.engine.save_resume_data()
                 self._last_save_resume_at = now
                 await self.event_bus.publish("autosave_triggered", {})
+
+            # ── Cache Pruning (cleanup removed torrents) ──────────────────────
+            # Find IDs that are in our cache but no longer in the engine
+            active_ids = set(self.engine.get_all_active_ids())
+            cached_ids = list(self._last_states.keys())
+            for tid in cached_ids:
+                if tid not in active_ids:
+                    logger.info("Pruning stale torrent from controller", extra={"torrent": tid})
+                    self._last_states.pop(tid, None)
+                    self._metrics.pop(tid, None)
+                    self._last_peers.pop(tid, None)
+                    self._last_piece_counts.pop(tid, None)
+                    self._last_completed_pieces.pop(tid, None)
+                    self._last_bw_utilization.pop(tid, None)
+                    self._piece_count_start.pop(tid, None)
+                    self._last_tune_metrics.pop(tid, None)
+                    self._last_tune_reason.pop(tid, None)
 
     # ── Graceful shutdown ─────────────────────────────────────────────────────
 
@@ -295,3 +373,47 @@ class Controller:
     @staticmethod
     def _is_due(last_at: float | None, interval: float, now: float) -> bool:
         return last_at is None or (now - last_at) >= interval
+
+    # ── Tuning helpers ────────────────────────────────────────────────────────
+
+    def _collect_tune_metrics(self, t_id: str, state: TorrentState, bw_util: float) -> dict:
+        """Assemble the metrics dict expected by TuneEvaluator from cached data."""
+        mc = self._metrics.get(t_id)
+        avg_rolling = mc.speed.rolling_avg() if mc else 0.0
+
+        peers = self._last_peers.get(t_id, [])
+        active_peers = [p for p in peers if not p.is_choked]
+
+        # Peer speed variance: σ of per-peer download speeds
+        speeds = [p.download_speed for p in peers]
+        avg_speed = sum(speeds) / max(len(speeds), 1)
+        variance: float = 0.0
+        if len(speeds) > 1:
+            variance = (sum((s - avg_speed) ** 2 for s in speeds) / len(speeds)) ** 0.5
+
+        piece_counts = self._last_piece_counts.get(t_id, {})
+        stalls = int(piece_counts.get("stalled", 0))
+
+        return {
+            "download_speed": state.download_speed,
+            "avg_speed": avg_rolling,
+            "peers": state.peers_connected,
+            "active_peers": len(active_peers),
+            "stalls": stalls,
+            "utilization": bw_util,
+            "peer_speed_variance": variance,
+        }
+
+    def get_tune_debug(self, t_id: str) -> dict | None:
+        """Return the last tuning debug snapshot for a torrent (for the API)."""
+        state = self._last_states.get(t_id)
+        if state is None:
+            return None
+        return {
+            "torrent_id": t_id,
+            "tune_level": state.tune_level.name,
+            "previous_level": getattr(state, "_prev_tune_name", state.tune_level.name),
+            "timestamp": int(state.last_tune_change) if state.last_tune_change else 0,
+            "metrics": self._last_tune_metrics.get(t_id, {}),
+            "decision": self._last_tune_reason.get(t_id, "pending"),
+        }

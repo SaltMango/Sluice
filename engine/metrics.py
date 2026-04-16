@@ -331,19 +331,22 @@ class MetricsCollector:
             )
 
         speeds = [max(int(getattr(p, "download_speed", 0)), 0) for p in peers]
-        active_count = sum(1 for p in peers if not getattr(p, "is_choked", False))
-        avg_speed = sum(speeds) / len(speeds)
+        active_speeds = [s for s in speeds if s > 0]
+        active_count = len(active_speeds)
+        
+        avg_speed = sum(speeds) / max(1, total)
 
-        # Dynamic threshold: 75th percentile of peer speeds (top 25% = fast)
-        sorted_speeds = sorted(speeds)
+        # Dynamic threshold: 75th percentile of active peer speeds (top 25% = fast)
+        sorted_speeds = sorted(active_speeds)
         p75_idx = max(0, int(len(sorted_speeds) * 0.75) - 1)
         fast_threshold = sorted_speeds[p75_idx] if sorted_speeds else 0.0
-        # Fallback: if all peers are identical speed, use avg as threshold
-        if fast_threshold == 0 and avg_speed > 0:
-            fast_threshold = avg_speed
+        
+        # Fallback: if all active peers have identical speed, use their average
+        if fast_threshold == 0 and active_count > 0:
+            fast_threshold = sum(active_speeds) / active_count
 
-        fast_count = sum(1 for s in speeds if s >= fast_threshold and s > 0)
-        slow_count = total - fast_count
+        fast_count = sum(1 for s in active_speeds if s >= fast_threshold)
+        slow_count = total - active_count
 
         return PeerMetrics(
             total=total,
@@ -378,11 +381,19 @@ class MetricsCollector:
         config: Any,
         avg_speed: float,
     ) -> SchedulerMetrics:
-        # Derive mode from config weights
-        rarity_w = getattr(config, "rarity_weight", 0.35)
-        speed_w = getattr(config, "speed_weight", 0.20)
-        peer_w = getattr(config, "peer_weight", 0.25)
-        pos_w = getattr(config, "position_weight", 0.20)
+        
+        applied_weights = last.get("applied_weights")
+        if applied_weights:
+            rarity_w = applied_weights.get("rarity", 0)
+            speed_w = applied_weights.get("speed", 0)
+            peer_w = applied_weights.get("peer", 0)
+            pos_w = applied_weights.get("position", 0)
+        else:
+            # Fallback to config
+            rarity_w = getattr(config, "rarity_weight", 0.35)
+            speed_w = getattr(config, "speed_weight", 0.20)
+            peer_w = getattr(config, "peer_weight", 0.25)
+            pos_w = getattr(config, "position_weight", 0.20)
 
         # Mode classification based on dominant weights
         if speed_w >= 0.45:
