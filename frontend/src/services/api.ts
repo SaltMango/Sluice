@@ -1,4 +1,4 @@
-import type { ApiResponse, GlobalStats, DebugStats, TorrentItem } from "../types/api";
+import type { ApiResponse, GlobalStats, DebugStats, TorrentItem, TorrentDetailData } from "../types/api";
 
 const API_BASE_URL = "http://localhost:8000/api";
 
@@ -16,17 +16,17 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<Api
 }
 
 export const engineApi = {
-  getTorrents: () => 
+  getTorrents: () =>
     fetchApi<{ torrents: TorrentItem[] }>("/torrents"),
 
-  getTorrentDetail: (id: string) => 
-    fetchApi<TorrentItem & { files: any[], trackers: any[] }>(`/torrent/${id}`),
+  getTorrentDetail: (id: string) =>
+    fetchApi<TorrentDetailData>(`/torrent/${id}`),
 
-  getStats: () => 
+  getStats: () =>
     fetchApi<GlobalStats>("/stats"),
 
-  getDebugStats: () => 
-    fetchApi<DebugStats>("/debug"),
+  getDebugStats: (include?: string) =>
+    fetchApi<DebugStats>(`/debug${include ? `?include=${encodeURIComponent(include)}` : ""}`),
 
   pauseTorrent: (id: string) => 
     fetchApi(`/torrent/${id}/pause`, { method: "POST" }),

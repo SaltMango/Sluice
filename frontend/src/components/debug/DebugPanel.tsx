@@ -1,14 +1,15 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useTorrentStore } from '../../store/useTorrentStore';
 import { formatSpeed } from '../../utils/format';
+import type { DebugStats } from '../../types/api';
 import './DebugPanel.css';
 
 export function DebugPanel() {
-  const storeDebugStats = useTorrentStore(state => state.debugStats);
-  
+  const storeDebugStats = useTorrentStore(state => state.debugStats) as DebugStats | null;
+
   const [isPaused, setIsPaused] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
-  const [displayStats, setDisplayStats] = useState(storeDebugStats);
+  const [displayStats, setDisplayStats] = useState<DebugStats | null>(storeDebugStats);
 
   useEffect(() => {
     if (!isPaused && storeDebugStats) {
@@ -16,7 +17,33 @@ export function DebugPanel() {
     }
   }, [storeDebugStats, isPaused]);
 
-  if (!displayStats) return null;
+  // Derive flat fields from the new nested structure for backward-compat display
+  const flat = useMemo(() => {
+    if (!displayStats) return null;
+    const g = displayStats.global;
+    const speed = g.speed;
+    const health = g.health;
+    const sched = displayStats.scheduler;
+
+    // Aggregate fast/slow across all torrents
+    let totalFast = 0, totalSlow = 0, totalActive = 0;
+    for (const t of displayStats.torrents ?? []) {
+      totalFast  += t.metrics?.peers?.fast  ?? 0;
+      totalSlow  += t.metrics?.peers?.slow  ?? 0;
+      totalActive += t.metrics?.pieces?.active ?? 0;
+    }
+
+    return {
+      scheduler_mode: sched?.mode ?? 'balanced',
+      active_pieces: totalActive,
+      average_peer_speed: speed?.avg_10s ?? g.total_speed_down / Math.max(g.total_peers, 1),
+      fast_peers: totalFast,
+      slow_peers: totalSlow,
+      bandwidth_utilization_percent: (health?.bandwidth_utilization ?? 0) * 100,
+    };
+  }, [displayStats]);
+
+  if (!displayStats || !flat) return null;
 
   if (isMinimized) {
     return (
@@ -32,13 +59,13 @@ export function DebugPanel() {
         <h3>
           Engine Debug
           <span style={{ fontSize: '0.7rem', background: 'var(--primary)', color: 'black', padding: '2px 6px', borderRadius: '4px', marginLeft: '8px' }}>
-            {displayStats.scheduler_mode}
+            {flat.scheduler_mode}
           </span>
         </h3>
         <div className="debug-actions">
-           <button 
-             onClick={() => setIsPaused(!isPaused)} 
-             className={`debug-btn ${isPaused ? 'paused' : ''}`} 
+           <button
+             onClick={() => setIsPaused(!isPaused)}
+             className={`debug-btn ${isPaused ? 'paused' : ''}`}
              title={isPaused ? "Resume Updates" : "Pause Updates"}
            >
              {isPaused ? "▶" : "⏸"}
@@ -48,36 +75,36 @@ export function DebugPanel() {
            </button>
         </div>
       </div>
-      
+
       <div className={`debug-content ${isPaused ? 'paused' : ''}`}>
         <div className="debug-row">
           <span>Active Pieces</span>
-          <span className="debug-value">{displayStats.active_pieces}</span>
+          <span className="debug-value">{flat.active_pieces}</span>
         </div>
-        
+
         <div className="debug-row">
           <span>Avg Peer Speed</span>
-          <span className="debug-value">{formatSpeed(displayStats.average_peer_speed)}</span>
+          <span className="debug-value">{formatSpeed(flat.average_peer_speed)}</span>
         </div>
-        
+
         <div className="debug-row">
           <span>Fast vs Slow Peers</span>
           <span className="debug-value">
-            <span style={{color: 'var(--status-completed)'}}>{displayStats.fast_peers}</span> 
-            {' / '} 
-            <span style={{color: 'var(--status-paused)'}}>{displayStats.slow_peers}</span>
+            <span style={{color: 'var(--status-completed)'}}>{flat.fast_peers}</span>
+            {' / '}
+            <span style={{color: 'var(--status-paused)'}}>{flat.slow_peers}</span>
           </span>
         </div>
-        
+
         <div className="debug-row" style={{ flexDirection: 'column', marginTop: '12px', marginBottom: '0' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
             <span>BW Utilization</span>
-            <span className="debug-value">{displayStats.bandwidth_utilization_percent.toFixed(1)}%</span>
+            <span className="debug-value">{flat.bandwidth_utilization_percent.toFixed(1)}%</span>
           </div>
           <div className="debug-progress-bar">
-            <div 
-              className="debug-progress-fill" 
-              style={{ width: `${Math.min(100, Math.max(0, displayStats.bandwidth_utilization_percent))}%` }} 
+            <div
+              className="debug-progress-fill"
+              style={{ width: `${Math.min(100, Math.max(0, flat.bandwidth_utilization_percent))}%` }}
             />
           </div>
         </div>
