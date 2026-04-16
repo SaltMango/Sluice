@@ -37,28 +37,36 @@ export const engineApi = {
   removeTorrent: (id: string) => 
     fetchApi(`/torrent/${id}/remove`, { method: "POST" }),
 
-  addTorrentFile: async (file: File) => {
+  addTorrentFile: async (file: File, save_path?: string) => {
     const formData = new FormData();
     formData.append("file", file);
-    return fetchApi<{ torrent_id: string }>("/torrent/add/file", {
+    return fetchApi<{ torrent_id: string }>(`/torrent/add/file${save_path ? `?save_path=${encodeURIComponent(save_path)}` : ''}`, {
       method: "POST",
       body: formData,
     });
   },
 
-  addTorrentMagnet: (magnet_link: string) => 
+  addTorrentMagnet: (magnet_link: string, save_path?: string) => 
     fetchApi<{ torrent_id: string }>("/torrent/add/magnet", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ magnet_link }),
+      body: JSON.stringify({ magnet_link, save_path }),
     }),
 
-  addTorrentUrl: (url: string) => 
+  addTorrentUrl: (url: string, save_path?: string) => 
     fetchApi<{ torrent_id: string }>("/torrent/add/url", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, save_path }),
     }),
+
+  browseFs: (path?: string) =>
+    fetchApi<{ current_path: string; parent_path: string | null; directories: { name: string; path: string }[] }>(
+        `/fs/browse${path ? `?path=${encodeURIComponent(path)}` : ''}`
+    ),
+
+  getDownloadsPath: () =>
+    fetchApi<{ downloads_path: string }>("/fs/downloads-path"),
 
   toggleAggressiveMode: (aggressive_mode: boolean) =>
     fetchApi("/mode", {

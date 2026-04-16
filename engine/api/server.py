@@ -13,7 +13,10 @@ from engine.api.models import (
 
 import asyncio
 import random
+import os
+from pathlib import Path
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse, parse_qs
 
 MOCK_AGGRESSION_LEVEL = 0
 
@@ -86,7 +89,7 @@ def get_current_time() -> int:
     return int(time.time())
 
 @app.post("/api/torrent/add/file", response_model=ApiResponse)
-async def add_torrent_file(file: UploadFile = File(...)):
+async def add_torrent_file(file: UploadFile = File(...), save_path: str | None = None):
     new_id = str(uuid.uuid4())
     await file.read(1024) # dummy read
     
@@ -115,9 +118,19 @@ async def add_torrent_file(file: UploadFile = File(...)):
 @app.post("/api/torrent/add/magnet", response_model=ApiResponse)
 async def add_torrent_magnet(req: MagnetAddRequest):
     new_id = str(uuid.uuid4())
+    
+    name = "magnet-download"
+    try:
+        parsed = urlparse(req.magnet_link)
+        qs = parse_qs(parsed.query)
+        if 'dn' in qs and qs['dn']:
+            name = qs['dn'][0]
+    except Exception:
+        pass
+        
     mock_torrent = TorrentItem(
         id=new_id,
-        name="magnet-download",
+        name=name,
         progress=0.0,
         download_speed=0,
         upload_speed=0,
@@ -140,9 +153,21 @@ async def add_torrent_magnet(req: MagnetAddRequest):
 @app.post("/api/torrent/add/url", response_model=ApiResponse)
 async def add_torrent_url(req: UrlAddRequest):
     new_id = str(uuid.uuid4())
+    
+    name = "url-download"
+    try:
+        parsed = urlparse(req.url)
+        path = parsed.path
+        if path and path != "/":
+            name = path.split("/")[-1]
+            if name.endswith(".torrent"):
+                name = name[:-8]
+    except Exception:
+        pass
+
     mock_torrent = TorrentItem(
         id=new_id,
-        name="url-download",
+        name=name,
         progress=0.0,
         download_speed=0,
         upload_speed=0,
@@ -159,8 +184,68 @@ async def add_torrent_url(req: UrlAddRequest):
     return ApiResponse(
         success=True, 
         message="Torrent added successfully", 
-        data={"torrent_id": new_id}
+        data={"torrent_id": new_id, "save_path": req.save_path}
     )
+
+@app.get("/api/fs/browse", response_model=ApiResponse)
+async def browse_fs(path: str | None = None):
+    try:
+        user_home = Path.home()
+        
+        target = Path(path) if path else user_home
+        
+        if not target.is_absolute():
+            target = user_home / target
+            
+        try:
+            target = target.resolve()
+        except Exception:
+            pass
+
+        # Make sure target is within user_home to prevent browsing system files
+        if user_home not in target.parents and target != user_home:
+            target = user_home
+
+        if not target.exists() or not target.is_dir():
+            target = user_home
+
+        dirs = []
+        try:
+            for entry in target.iterdir():
+                if entry.is_dir() and not entry.name.startswith('.'):
+                    # Adding a basic check to skip system dirs if accidentally reached
+                    try:
+                        dirs.append({"name": entry.name, "path": str(entry.absolute())})
+                    except PermissionError:
+                        pass
+        except PermissionError:
+            pass
+        
+        dirs.sort(key=lambda x: x["name"].lower())
+
+        parent_path = str(target.parent) if target != user_home else None
+
+        return ApiResponse(
+            success=True,
+            data={
+                "current_path": str(target),
+                "parent_path": parent_path,
+                "directories": dirs
+            }
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+@app.get("/api/fs/downloads-path", response_model=ApiResponse)
+async def get_downloads_path():
+    try:
+        user_home = Path.home()
+        downloads = user_home / "Downloads"
+        if not downloads.exists():
+            downloads = user_home
+        return ApiResponse(success=True, data={"downloads_path": str(downloads)})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
 
 @app.get("/api/torrents", response_model=ApiResponse)
 async def get_torrents():

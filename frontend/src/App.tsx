@@ -3,11 +3,12 @@ import { TopBar } from "./components/layout/TopBar";
 import { StatsBar } from "./components/layout/StatsBar";
 import { TorrentTable } from "./components/torrent/TorrentTable";
 import { AddTorrentModal } from "./components/torrent/AddTorrentModal";
-import { DebugPanel } from "./components/debug/DebugPanel";
+import { TorrentDetail } from "./components/torrent/TorrentDetail";
 import { useTorrentStore } from "./store/useTorrentStore";
 
 function App() {
   const [showAddModal, setShowAddModal] = useState(false);
+  const [selectedTorrentId, setSelectedTorrentId] = useState<string | null>(null);
   const fetchData = useTorrentStore((state) => state.fetchData);
   const error = useTorrentStore((state) => state.error);
 
@@ -40,12 +41,14 @@ function App() {
             Connection Error: {error}
           </div>
         )}
-        
-        <TorrentTable />
+        {selectedTorrentId ? (
+          <TorrentDetail id={selectedTorrentId} onBack={() => setSelectedTorrentId(null)} />
+        ) : (
+          <TorrentTable onRowClick={(id: string) => setSelectedTorrentId(id)} />
+        )}
       </main>
 
       <StatsBar />
-      <DebugPanel />
 
       {showAddModal && <AddTorrentModal onClose={() => setShowAddModal(false)} />}
     </div>

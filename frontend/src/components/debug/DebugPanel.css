@@ -1,14 +1,9 @@
 .debug-panel {
-  position: fixed;
-  bottom: 80px; /* Above stats bar */
-  right: 20px;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 16px;
-  width: 250px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-  z-index: 100;
+  width: 100%;
   font-size: 0.85rem;
   color: var(--text-secondary);
 }
@@ -48,15 +43,10 @@
 }
 
 .debug-panel-minimized {
-  position: fixed;
-  bottom: 80px;
-  right: 20px;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 16px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-  z-index: 100;
   font-size: 0.85rem;
   font-weight: 500;
   color: var(--text-primary);
@@ -64,6 +54,7 @@
   display: flex;
   align-items: center;
   transition: background 0.2s;
+  width: fit-content;
 }
 
 .debug-panel-minimized:hover {

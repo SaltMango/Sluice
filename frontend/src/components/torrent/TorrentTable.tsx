@@ -3,12 +3,13 @@ import { formatBytes, formatSpeed, formatTime } from "../../utils/format";
 import { useTorrentStore } from "../../store/useTorrentStore";
 import type { TorrentItem } from "../../types/api";
 
-const TorrentRow: React.FC<{ torrent: TorrentItem }> = ({ torrent }) => {
+const TorrentRow: React.FC<{ torrent: TorrentItem, onClick: () => void }> = ({ torrent, onClick }) => {
   const { pauseTorrent, resumeTorrent, removeTorrent } = useTorrentStore();
+  const stats = useTorrentStore((state) => state.stats);
   const percent = (torrent.progress * 100).toFixed(1);
 
   return (
-    <tr className="torrent-row">
+    <tr className="torrent-row" onClick={onClick} style={{ cursor: 'pointer' }}>
       <td>
         <div className="cell-name" title={torrent.name}>{torrent.name}</div>
         <div className="cell-size">{formatBytes(torrent.downloaded)} / {formatBytes(torrent.size)}</div>
@@ -36,20 +37,26 @@ const TorrentRow: React.FC<{ torrent: TorrentItem }> = ({ torrent }) => {
       <td>{torrent.download_speed > 0 ? formatSpeed(torrent.download_speed) : "-"}</td>
       <td>{torrent.upload_speed > 0 ? formatSpeed(torrent.upload_speed) : "-"}</td>
       <td>{torrent.peers} / {torrent.seeds}</td>
+      <td style={stats.aggressive_mode ? {color: 'var(--status-error)', fontWeight: 500} : {}}>
+        Lvl {stats.aggression_level ?? 0}
+      </td>
+      <td>{torrent.download_speed > 0 || torrent.upload_speed > 0 ? 'Yes' : 'No'}</td>
       <td>{torrent.status === 'downloading' ? formatTime(torrent.eta) : "-"}</td>
       <td>
-        {torrent.status === "downloading" || torrent.status === "checking" ? (
-          <button className="btn btn-icon" onClick={() => pauseTorrent(torrent.id)} title="Pause">⏸</button>
-        ) : (
-          <button className="btn btn-icon" onClick={() => resumeTorrent(torrent.id)} title="Resume">▶</button>
-        )}
-        <button className="btn btn-icon btn-danger" onClick={() => removeTorrent(torrent.id)} title="Remove">✕</button>
+        <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: '4px' }}>
+          {torrent.status === "downloading" || torrent.status === "checking" ? (
+            <button className="btn btn-icon" onClick={() => pauseTorrent(torrent.id)} title="Pause">⏸</button>
+          ) : (
+            <button className="btn btn-icon" onClick={() => resumeTorrent(torrent.id)} title="Resume">▶</button>
+          )}
+          <button className="btn btn-icon btn-danger" onClick={() => removeTorrent(torrent.id)} title="Remove">✕</button>
+        </div>
       </td>
     </tr>
   );
 };
 
-export const TorrentTable: React.FC = () => {
+export const TorrentTable: React.FC<{ onRowClick: (id: string) => void }> = ({ onRowClick }) => {
   const torrents = useTorrentStore((state) => state.torrents);
 
   if (torrents.length === 0) {
@@ -76,13 +83,15 @@ export const TorrentTable: React.FC = () => {
           <th>Down Speed</th>
           <th>Up Speed</th>
           <th>Peers / Seeds</th>
+          <th>Tune Lvl</th>
+          <th>Active</th>
           <th>ETA</th>
           <th>Actions</th>
         </tr>
       </thead>
       <tbody>
         {torrents.map((t) => (
-          <TorrentRow key={t.id} torrent={t} />
+          <TorrentRow key={t.id} torrent={t} onClick={() => onRowClick(t.id)} />
         ))}
       </tbody>
     </table>

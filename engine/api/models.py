@@ -32,6 +32,8 @@ class ApiResponse(BaseModel):
 
 class MagnetAddRequest(BaseModel):
     magnet_link: str
+    save_path: Optional[str] = None
 
 class UrlAddRequest(BaseModel):
     url: str
+    save_path: Optional[str] = None

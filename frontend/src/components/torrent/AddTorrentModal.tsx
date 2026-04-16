@@ -1,6 +1,7 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { engineApi } from "../../services/api";
 import { useTorrentStore } from "../../store/useTorrentStore";
+import { FileBrowserModal } from "./FileBrowserModal";
 
 interface AddTorrentModalProps {
   onClose: () => void;
@@ -12,7 +13,17 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({ onClose }) => 
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [savePath, setSavePath] = useState("");
+  const [showFileBrowser, setShowFileBrowser] = useState(false);
   const fetchData = useTorrentStore((state) => state.fetchData);
+
+  useEffect(() => {
+    engineApi.getDownloadsPath().then((res) => {
+      if (res.success && res.data) {
+        setSavePath(res.data.downloads_path);
+      }
+    }).catch(() => {});
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -23,13 +34,13 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({ onClose }) => 
       let res;
       if (tab === "magnet") {
         if (!inputValue) throw new Error("Magnet link is required");
-        res = await engineApi.addTorrentMagnet(inputValue);
+        res = await engineApi.addTorrentMagnet(inputValue, savePath || undefined);
       } else if (tab === "url") {
         if (!inputValue) throw new Error("URL is required");
-        res = await engineApi.addTorrentUrl(inputValue);
+        res = await engineApi.addTorrentUrl(inputValue, savePath || undefined);
       } else {
         if (!file) throw new Error("File is required");
-        res = await engineApi.addTorrentFile(file);
+        res = await engineApi.addTorrentFile(file, savePath || undefined);
       }
 
       if (res.success) {
@@ -38,8 +49,8 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({ onClose }) => 
       } else {
         setError(res.error || "Failed to add torrent");
       }
-    } catch (err: any) {
-      setError(err.message || "Unknown error occurred");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Unknown error occurred");
     } finally {
       setLoading(false);
     }
@@ -86,6 +97,27 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({ onClose }) => 
             )}
           </div>
 
+          <div className="form-group" style={{ marginTop: '16px' }}>
+            <label className="form-label">Save Location (Optional)</label>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input 
+                type="text" 
+                className="form-input" 
+                placeholder="Default Downloads Folder"
+                value={savePath}
+                onChange={(e) => setSavePath(e.target.value)}
+                style={{ flex: 1 }}
+              />
+              <button 
+                type="button" 
+                className="btn" 
+                onClick={() => setShowFileBrowser(true)}
+              >
+                Browse...
+              </button>
+            </div>
+          </div>
+
           {error && <div style={{color: 'var(--status-error)', fontSize: '0.875rem', marginBottom: '16px'}}>{error}</div>}
 
           <div className="modal-actions">
@@ -96,6 +128,17 @@ export const AddTorrentModal: React.FC<AddTorrentModalProps> = ({ onClose }) => 
           </div>
         </form>
       </div>
+
+      {showFileBrowser && (
+        <FileBrowserModal 
+          onClose={() => setShowFileBrowser(false)} 
+          onSelect={(path) => {
+            setSavePath(path);
+            setShowFileBrowser(false);
+          }} 
+          initialPath={savePath}
+        />
+      )}
     </div>
   );
 };
