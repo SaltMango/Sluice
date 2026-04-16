@@ -38,12 +38,18 @@ class PeerInfo:
 @dataclass(slots=True)
 class TorrentState:
     """A clean domain snapshot representing the active condition of the engine for UI consumption."""
+    id: str
     name: str
+    save_path: str
     progress: float
     download_speed: int
     upload_speed: int
     peers_connected: int
+    seeds_connected: int
     state_str: str
+    total_size: int
+    total_downloaded: int
+    added_at: float
 
 @dataclass(slots=True)
 class ScoredPeer:

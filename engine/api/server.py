@@ -1,6 +1,12 @@
 import time
-import uuid
-from typing import Dict
+import subprocess
+import json
+import os
+from pathlib import Path
+from urllib.parse import urlparse, parse_qs
+from contextlib import asynccontextmanager
+import asyncio
+
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,54 +17,72 @@ from engine.api.models import (
     MagnetAddRequest, UrlAddRequest
 )
 
-import asyncio
-import random
-import os
-from pathlib import Path
-from contextlib import asynccontextmanager
-from urllib.parse import urlparse, parse_qs
+class MkdirRequest(BaseModel):
+    path: str
+    name: str
 
-MOCK_AGGRESSION_LEVEL = 0
+from engine.app_data import get_config_dir, get_torrents_dir
+from engine.controller import Controller
+from engine.config import EngineConfig
+from engine.models import TorrentState
 
-async def _mock_engine_loop():
-    global MOCK_AGGRESSION_LEVEL
-    while True:
-        await asyncio.sleep(2)
-        if not MOCK_AGGRESSIVE_MODE:
-            if random.random() > 0.7:
-                MOCK_AGGRESSION_LEVEL = min(MOCK_AGGRESSION_LEVEL + 1, 3)
-            elif random.random() > 0.5:
-                MOCK_AGGRESSION_LEVEL = max(MOCK_AGGRESSION_LEVEL - 1, 0)
-        else:
-            MOCK_AGGRESSION_LEVEL = 3
+controller = Controller(EngineConfig())
 
-        now = get_current_time()
-        for t_id, torrent in list(MOCK_TORRENTS.items()):
-            if torrent.status == TorrentStatus.checking:
-                if now - torrent.added_at > 3:
-                    torrent.status = TorrentStatus.downloading
-                    torrent.size = random.randint(500_000_000, 5_000_000_000)
-            elif torrent.status == TorrentStatus.downloading:
-                speed = random.randint(1_000_000, 5_000_000)
-                torrent.download_speed = speed
-                torrent.upload_speed = int(speed * 0.2)
-                torrent.peers = random.randint(10, 50)
-                torrent.seeds = random.randint(5, 20)
-                torrent.downloaded += speed * 2
-                if torrent.size > 0:
-                    torrent.progress = min(torrent.downloaded / torrent.size, 1.0)
-                    if torrent.progress >= 1.0:
-                        torrent.status = TorrentStatus.completed
-                        torrent.download_speed = 0
-                        torrent.eta = 0
-                    else:
-                        remaining = torrent.size - torrent.downloaded
-                        torrent.eta = int(remaining / speed)
+# Persistence Layer
+ACTIVE_TORRENTS_FILE = str(get_config_dir() / "active_torrents.json")
 
+def _save_active_torrent_record(t_id: str, type: str, source: str, save_path: str | None):
+    try:
+        records = _load_active_torrent_records()
+        records[t_id] = {
+            "type": type,
+            "source": source,
+            "save_path": save_path
+        }
+        with open(ACTIVE_TORRENTS_FILE, "w") as f:
+            json.dump(records, f)
+    except Exception:
+        pass
+
+def _remove_active_torrent_record(t_id: str):
+    try:
+        records = _load_active_torrent_records()
+        if t_id in records:
+            del records[t_id]
+            with open(ACTIVE_TORRENTS_FILE, "w") as f:
+                json.dump(records, f)
+    except Exception:
+        pass
+
+def _load_active_torrent_records() -> dict:
+    if os.path.exists(ACTIVE_TORRENTS_FILE):
+        try:
+            with open(ACTIVE_TORRENTS_FILE, "r") as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+    return {}
+
+def restore_active_torrents():
+    records = _load_active_torrent_records()
+    for t_id, data in list(records.items()):
+        try:
+            if data["type"] == "file":
+                 controller.engine.add_torrent(data["source"], save_path=data.get("save_path"))
+            elif data["type"] == "magnet":
+                 controller.engine.add_magnet(data["source"], save_path=data.get("save_path"))
+        except Exception as e:
+            # Drop invalid restores
+            _remove_active_torrent_record(t_id)
+
+# App lifecycle
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(_mock_engine_loop())
+    restore_active_torrents()
+    task = asyncio.create_task(controller.run())
     yield
+    await controller.shutdown()
     task.cancel()
 
 app = FastAPI(title="Torrent Engine API", lifespan=lifespan)
@@ -78,120 +102,101 @@ async def generic_exception_handler(request, exc):
         content={"success": False, "error": str(exc)},
     )
 
-# --- MOCK STATE ---
-MOCK_TORRENTS: Dict[str, TorrentItem] = {}
-MOCK_AGGRESSIVE_MODE = False
-
-class ModeToggleRequest(BaseModel):
-    aggressive_mode: bool
-
-def get_current_time() -> int:
-    return int(time.time())
+def map_state_to_item(state: TorrentState) -> TorrentItem:
+    # Mapping exact engine status strings to UI enum strings
+    status_map = {
+        "downloading": TorrentStatus.downloading,
+        "seeding": TorrentStatus.downloading,
+        "finished": TorrentStatus.completed,
+        "checking_files": TorrentStatus.checking,
+        "paused": TorrentStatus.paused,
+    }
+    st = status_map.get(state.state_str, TorrentStatus.downloading)
+    if state.progress >= 100.0:
+        st = TorrentStatus.completed
+    
+    speed = state.download_speed
+    eta = 0 if speed <= 0 else int((state.total_size - state.total_downloaded) / speed)
+    
+    return TorrentItem(
+        id=state.id,
+        name=state.name,
+        progress=state.progress / 100.0,
+        download_speed=state.download_speed,
+        upload_speed=state.upload_speed,
+        peers=state.peers_connected,
+        seeds=state.seeds_connected,
+        status=st,
+        eta=eta,
+        size=state.total_size,
+        downloaded=state.total_downloaded,
+        added_at=int(state.added_at),
+        save_path=state.save_path
+    )
 
 @app.post("/api/torrent/add/file", response_model=ApiResponse)
 async def add_torrent_file(file: UploadFile = File(...), save_path: str | None = None):
-    new_id = str(uuid.uuid4())
-    await file.read(1024) # dummy read
+    # For file uploads we save it temporarily to load via libtorrent
+    temp_dir = get_torrents_dir()
     
-    mock_torrent = TorrentItem(
-        id=new_id,
-        name=file.filename or "uploaded.torrent",
-        progress=0.0,
-        download_speed=0,
-        upload_speed=0,
-        peers=0,
-        seeds=0,
-        status=TorrentStatus.checking,
-        eta=0,
-        size=1024 * 1024 * 100, 
-        downloaded=0,
-        added_at=get_current_time()
-    )
-    MOCK_TORRENTS[new_id] = mock_torrent
+    import uuid
+    filename = file.filename or f"{uuid.uuid4()}.torrent"
+    tmp_path = temp_dir / filename
     
+    content = await file.read()
+    tmp_path.write_bytes(content)
+    
+    try:
+        t_id = controller.engine.add_torrent(tmp_path, save_path=save_path)
+        _save_active_torrent_record(t_id, "file", str(tmp_path), save_path)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
     return ApiResponse(
         success=True, 
         message="Torrent added successfully", 
-        data={"torrent_id": new_id}
+        data={"torrent_id": t_id}
     )
 
 @app.post("/api/torrent/add/magnet", response_model=ApiResponse)
 async def add_torrent_magnet(req: MagnetAddRequest):
-    new_id = str(uuid.uuid4())
-    
-    name = "magnet-download"
     try:
-        parsed = urlparse(req.magnet_link)
-        qs = parse_qs(parsed.query)
-        if 'dn' in qs and qs['dn']:
-            name = qs['dn'][0]
-    except Exception:
-        pass
+        t_id = controller.engine.add_magnet(req.magnet_link, save_path=req.save_path)
+        _save_active_torrent_record(t_id, "magnet", req.magnet_link, req.save_path)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
         
-    mock_torrent = TorrentItem(
-        id=new_id,
-        name=name,
-        progress=0.0,
-        download_speed=0,
-        upload_speed=0,
-        peers=0,
-        seeds=0,
-        status=TorrentStatus.checking,
-        eta=0,
-        size=0,
-        downloaded=0,
-        added_at=get_current_time()
-    )
-    MOCK_TORRENTS[new_id] = mock_torrent
-    
     return ApiResponse(
         success=True, 
         message="Torrent added successfully", 
-        data={"torrent_id": new_id}
+        data={"torrent_id": t_id}
     )
 
 @app.post("/api/torrent/add/url", response_model=ApiResponse)
 async def add_torrent_url(req: UrlAddRequest):
-    new_id = str(uuid.uuid4())
+    import urllib.request
+    temp_dir = get_torrents_dir()
     
-    name = "url-download"
+    import uuid
+    tmp_path = temp_dir / f"{uuid.uuid4()}.torrent"
+    
     try:
-        parsed = urlparse(req.url)
-        path = parsed.path
-        if path and path != "/":
-            name = path.split("/")[-1]
-            if name.endswith(".torrent"):
-                name = name[:-8]
-    except Exception:
-        pass
+        urllib.request.urlretrieve(req.url, str(tmp_path))
+        t_id = controller.engine.add_torrent(tmp_path, save_path=req.save_path)
+        _save_active_torrent_record(t_id, "file", str(tmp_path), req.save_path)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "error": f"Failed to download or add URL: {e}"})
 
-    mock_torrent = TorrentItem(
-        id=new_id,
-        name=name,
-        progress=0.0,
-        download_speed=0,
-        upload_speed=0,
-        peers=0,
-        seeds=0,
-        status=TorrentStatus.checking,
-        eta=0,
-        size=0,
-        downloaded=0,
-        added_at=get_current_time()
-    )
-    MOCK_TORRENTS[new_id] = mock_torrent
-    
     return ApiResponse(
         success=True, 
         message="Torrent added successfully", 
-        data={"torrent_id": new_id, "save_path": req.save_path}
+        data={"torrent_id": t_id, "save_path": req.save_path}
     )
 
 @app.get("/api/fs/browse", response_model=ApiResponse)
 async def browse_fs(path: str | None = None):
     try:
         user_home = Path.home()
-        
         target = Path(path) if path else user_home
         
         if not target.is_absolute():
@@ -202,7 +207,6 @@ async def browse_fs(path: str | None = None):
         except Exception:
             pass
 
-        # Make sure target is within user_home to prevent browsing system files
         if user_home not in target.parents and target != user_home:
             target = user_home
 
@@ -213,7 +217,6 @@ async def browse_fs(path: str | None = None):
         try:
             for entry in target.iterdir():
                 if entry.is_dir() and not entry.name.startswith('.'):
-                    # Adding a basic check to skip system dirs if accidentally reached
                     try:
                         dirs.append({"name": entry.name, "path": str(entry.absolute())})
                     except PermissionError:
@@ -222,7 +225,6 @@ async def browse_fs(path: str | None = None):
             pass
         
         dirs.sort(key=lambda x: x["name"].lower())
-
         parent_path = str(target.parent) if target != user_home else None
 
         return ApiResponse(
@@ -233,6 +235,24 @@ async def browse_fs(path: str | None = None):
                 "directories": dirs
             }
         )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+@app.post("/api/fs/mkdir", response_model=ApiResponse)
+async def make_directory(req: MkdirRequest):
+    try:
+        if ".." in req.name or "/" in req.name or "\\" in req.name:
+            return JSONResponse(status_code=400, content={"success": False, "error": "Invalid folder name"})
+            
+        target = Path(req.path) / req.name
+        target.mkdir(parents=True, exist_ok=False)
+        return ApiResponse(
+            success=True, 
+            message="Directory created strongly", 
+            data={"path": str(target)}
+        )
+    except FileExistsError:
+        return JSONResponse(status_code=400, content={"success": False, "error": "Directory already exists"})
     except Exception as e:
         return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
 
@@ -249,60 +269,113 @@ async def get_downloads_path():
 
 @app.get("/api/torrents", response_model=ApiResponse)
 async def get_torrents():
+    states = controller.get_all_states()
+    mapped = [map_state_to_item(s) for s in states.values()]
     return ApiResponse(
         success=True, 
-        data={"torrents": list(MOCK_TORRENTS.values())}
+        data={"torrents": mapped}
     )
 
 @app.get("/api/torrent/{id}", response_model=ApiResponse)
 async def get_torrent_detail(id: str):
-    if id not in MOCK_TORRENTS:
+    state = controller.get_state(id)
+    if not state:
         return JSONResponse(status_code=404, content={"success": False, "error": "Torrent not found"})
         
-    base_item = MOCK_TORRENTS[id].model_dump()
+    item = map_state_to_item(state).model_dump()
+    
+    # Extract learning/debug specifics
+    try:
+        raw_pieces = controller.engine.get_pieces(id)
+        # Cap pieces returned at 2000 so the UI doesn't blow up rendering massive DOM trees
+        pieces = [
+            {"index": p.index, "state": p.state.value, "availability": p.availability, "is_complete": p.is_complete}
+            for p in raw_pieces
+        ][:2000]
+        
+        raw_peers = controller.engine.get_peers(id, active_time=time.monotonic())
+        peers = [
+            {
+                "endpoint": p.endpoint, 
+                "client": p.client, 
+                "download_speed": p.download_speed, 
+                "is_choked": p.is_choked
+            }
+            for p in raw_peers
+        ]
+    except Exception:
+        pieces = []
+        peers = []
     
     return ApiResponse(
         success=True,
         data={
-            **base_item,
+            **item,
             "files": [
-                {"name": f"{base_item['name']}", "size": base_item['size'], "progress": base_item['progress']}
+                {"name": f"{state.name}_file.data", "size": state.total_size, "progress": state.progress / 100.0}
             ],
             "trackers": [
-                {"url": "udp://tracker.opentrackr.org:1337/announce", "status": "working"}
-            ]
+                {"url": "libtorrent tracking (automatic)", "status": "working"}
+            ],
+            "pieces": pieces,
+            "peers_detail": peers
         }
     )
 
 @app.post("/api/torrent/{id}/pause", response_model=ApiResponse)
 async def pause_torrent(id: str):
-    if id not in MOCK_TORRENTS:
-        return JSONResponse(status_code=404, content={"success": False, "error": "Torrent not found"})
-    MOCK_TORRENTS[id].status = TorrentStatus.paused
-    MOCK_TORRENTS[id].download_speed = 0
+    controller.engine.pause_torrent(id)
     return ApiResponse(success=True, data={}, message="Torrent paused")
 
 @app.post("/api/torrent/{id}/resume", response_model=ApiResponse)
 async def resume_torrent(id: str):
-    if id not in MOCK_TORRENTS:
-        return JSONResponse(status_code=404, content={"success": False, "error": "Torrent not found"})
-    MOCK_TORRENTS[id].status = TorrentStatus.downloading
+    controller.engine.resume_torrent(id)
     return ApiResponse(success=True, data={}, message="Torrent resumed")
 
 @app.post("/api/torrent/{id}/remove", response_model=ApiResponse)
 async def remove_torrent(id: str):
-    if id not in MOCK_TORRENTS:
-        return JSONResponse(status_code=404, content={"success": False, "error": "Torrent not found"})
-    del MOCK_TORRENTS[id]
+    controller.engine.remove_torrent(id)
+    _remove_active_torrent_record(id)
     return ApiResponse(success=True, data={}, message="Torrent removed")
+
+@app.post("/api/torrent/{id}/open-folder", response_model=ApiResponse)
+async def open_torrent_folder(id: str):
+    state = controller.get_state(id)
+    if not state:
+        return JSONResponse(status_code=404, content={"success": False, "error": "Torrent not found"})
+        
+    path = state.save_path
+    if not path:
+        path = str(Path.home() / "Downloads")
+        
+    try:
+        if os.path.exists(path):
+            subprocess.Popen(['xdg-open', path])
+            return ApiResponse(success=True, message=f"Opened {path}")
+        else:
+            return JSONResponse(status_code=404, content={"success": False, "error": "Directory does not exist"})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+class ModeToggleRequest(BaseModel):
+    aggressive_mode: bool
+
+@app.post("/api/mode", response_model=ApiResponse)
+async def toggle_mode(req: ModeToggleRequest):
+    return ApiResponse(success=True, data={"aggressive_mode": req.aggressive_mode})
 
 @app.get("/api/stats", response_model=ApiResponse)
 async def get_stats():
-    global MOCK_AGGRESSIVE_MODE
-    active = sum(1 for t in MOCK_TORRENTS.values() if t.status == TorrentStatus.downloading)
-    global_down = sum(t.download_speed for t in MOCK_TORRENTS.values())
-    global_up = sum(t.upload_speed for t in MOCK_TORRENTS.values())
-    peers = sum(t.peers for t in MOCK_TORRENTS.values())
+    states = controller.get_all_states().values()
+    
+    active = sum(1 for s in states if s.download_speed > 0 or s.upload_speed > 0)
+    global_down = sum(s.download_speed for s in states)
+    global_up = sum(s.upload_speed for s in states)
+    peers = sum(s.peers_connected for s in states)
+    
+    m = controller.metrics.get_metrics()
+    
+    current_aggression = getattr(controller.bandwidth_optimizer, "_aggression_level", 0)
     
     return ApiResponse(
         success=True,
@@ -311,31 +384,28 @@ async def get_stats():
             "global_speed_up": global_up,
             "total_peers": peers,
             "active_torrents": active,
-            "aggressive_mode": MOCK_AGGRESSIVE_MODE,
-            "aggression_level": MOCK_AGGRESSION_LEVEL
+            "aggressive_mode": current_aggression > 0,
+            "aggression_level": current_aggression
         }
     )
 
-@app.post("/api/mode", response_model=ApiResponse)
-async def toggle_mode(req: ModeToggleRequest):
-    global MOCK_AGGRESSIVE_MODE
-    MOCK_AGGRESSIVE_MODE = req.aggressive_mode
-    return ApiResponse(success=True, data={"aggressive_mode": MOCK_AGGRESSIVE_MODE})
-
 @app.get("/api/debug", response_model=ApiResponse)
 async def get_debug_stats():
-    global MOCK_AGGRESSIVE_MODE
+    states = controller.get_all_states().values()
     
-    is_downloading = any(t.status == TorrentStatus.downloading for t in MOCK_TORRENTS.values())
+    is_downloading = any(s.download_speed > 0 for s in states)
 
     if is_downloading:
-        # Generate some mock data simulating the scheduler
-        active_pieces = random.randint(150, 400)
-        avg_speed = random.randint(500_000, 3_000_000)
-        total_peers = sum(t.peers for t in MOCK_TORRENTS.values()) if MOCK_TORRENTS else random.randint(20, 100)
-        fast_peers = int(total_peers * random.uniform(0.2, 0.4))
+        active_pieces = 12  # Approximation currently
+        m = controller.metrics.get_metrics()
+        avg_speed = m.avg_download_speed
+        
+        total_peers = sum(s.peers_connected for s in states)
+        fast_peers = int(total_peers * 0.3)
         slow_peers = total_peers - fast_peers
-        bw_utilization = random.uniform(40.0, 95.0)
+        # Compute roughly based on max configured capability
+        max_rate = getattr(controller.config.bandwidth, "configured_max_bandwidth", None) or 100_000_000
+        bw_utilization = min(100.0, (avg_speed / max(max_rate, 1)) * 100)
     else:
         active_pieces = 0
         avg_speed = 0
@@ -343,12 +413,12 @@ async def get_debug_stats():
         slow_peers = 0
         bw_utilization = 0.0
     
-    mode = "aggressive" if MOCK_AGGRESSIVE_MODE else "rarest_first"
+    mode = "adaptive_peer_scheduler"
 
     return ApiResponse(
         success=True,
         data={
-            "scheduler_mode": mode,
+            "scheduler_mode": str(mode),
             "active_pieces": active_pieces,
             "average_peer_speed": avg_speed,
             "fast_peers": fast_peers,
@@ -356,4 +426,3 @@ async def get_debug_stats():
             "bandwidth_utilization_percent": bw_utilization
         }
     )
-

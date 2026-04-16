@@ -5,7 +5,6 @@ import type { TorrentItem } from "../../types/api";
 
 const TorrentRow: React.FC<{ torrent: TorrentItem, onClick: () => void }> = ({ torrent, onClick }) => {
   const { pauseTorrent, resumeTorrent, removeTorrent } = useTorrentStore();
-  const stats = useTorrentStore((state) => state.stats);
   const percent = (torrent.progress * 100).toFixed(1);
 
   return (
@@ -37,8 +36,8 @@ const TorrentRow: React.FC<{ torrent: TorrentItem, onClick: () => void }> = ({ t
       <td>{torrent.download_speed > 0 ? formatSpeed(torrent.download_speed) : "-"}</td>
       <td>{torrent.upload_speed > 0 ? formatSpeed(torrent.upload_speed) : "-"}</td>
       <td>{torrent.peers} / {torrent.seeds}</td>
-      <td style={stats.aggressive_mode ? {color: 'var(--status-error)', fontWeight: 500} : {}}>
-        Lvl {stats.aggression_level ?? 0}
+      <td style={torrent.tune_level && torrent.tune_level > 1 ? {color: 'var(--status-error)', fontWeight: 500} : {}}>
+        Lvl {torrent.tune_level ?? 0}
       </td>
       <td>{torrent.download_speed > 0 || torrent.upload_speed > 0 ? 'Yes' : 'No'}</td>
       <td>{torrent.status === 'downloading' ? formatTime(torrent.eta) : "-"}</td>

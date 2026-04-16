@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { formatBytes, formatSpeed, formatTime } from "../../utils/format";
 import { engineApi } from "../../services/api";
-import type { TorrentItem } from "../../types/api";
+import type { TorrentDetailData } from "../../types/api";
 import { useTorrentStore } from "../../store/useTorrentStore";
-import { DebugPanel } from "../debug/DebugPanel";
 
 interface TorrentDetailProps {
   id: string;
@@ -11,7 +10,7 @@ interface TorrentDetailProps {
 }
 
 export const TorrentDetail: React.FC<TorrentDetailProps> = ({ id, onBack }) => {
-  const [detail, setDetail] = useState<TorrentItem & { files: {name: string, size: number, progress: number}[], trackers: unknown[] } | null>(null);
+  const [detail, setDetail] = useState<TorrentDetailData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,7 +22,7 @@ export const TorrentDetail: React.FC<TorrentDetailProps> = ({ id, onBack }) => {
       try {
         const res = await engineApi.getTorrentDetail(id);
         if (res.success && res.data) {
-          if (mounted) setDetail(res.data);
+          if (mounted) setDetail(res.data as TorrentDetailData);
         } else {
           if (mounted) setError(res.error || "Failed to fetch detail");
         }
@@ -72,6 +71,7 @@ export const TorrentDetail: React.FC<TorrentDetailProps> = ({ id, onBack }) => {
             </div>
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
+            <button className="btn" onClick={() => engineApi.openFolder(detail.id)}>📁 Open Folder</button>
             {detail.status === "downloading" || detail.status === "checking" ? (
               <button className="btn" onClick={() => pauseTorrent(detail.id)}>⏸ Pause</button>
             ) : (
@@ -138,9 +138,110 @@ export const TorrentDetail: React.FC<TorrentDetailProps> = ({ id, onBack }) => {
       </div>
       
       <div style={{ marginTop: '24px' }}>
-        <h3>Engine Debug Info</h3>
-        <div style={{ position: 'relative', width: '100%', maxWidth: '400px' }}>
-          <DebugPanel />
+        <h3>Learning & Debug Insights</h3>
+        
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '24px', marginTop: '16px' }}>
+          
+          <div style={{ backgroundColor: 'var(--bg-secondary)', padding: '16px', borderRadius: '8px' }}>
+            <h4 style={{ marginTop: 0, marginBottom: '16px', fontSize: '1rem' }}>Swarm Peer Analysis</h4>
+            <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+              <table className="torrent-table" style={{ margin: 0, width: '100%', fontSize: '0.85rem' }}>
+                <thead style={{ position: 'sticky', top: 0, zIndex: 1, backgroundColor: 'var(--bg-secondary)' }}>
+                  <tr>
+                    <th>Endpoint</th>
+                    <th>Client</th>
+                    <th>Speed</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(!detail.peers_detail || detail.peers_detail.length === 0) ? (
+                    <tr><td colSpan={4} style={{ textAlign: 'center', opacity: 0.5 }}>No active peers</td></tr>
+                  ) : (
+                    detail.peers_detail.map((p, i) => (
+                      <tr key={i}>
+                        <td style={{ fontFamily: 'monospace' }}>{p.endpoint}</td>
+                        <td style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.client}>{p.client || 'Unknown'}</td>
+                        <td style={{ color: p.download_speed > 0 ? 'var(--status-downloading)' : 'inherit' }}>
+                          {formatSpeed(p.download_speed)}
+                        </td>
+                        <td>
+                          {p.is_choked ? 
+                            <span style={{ color: 'var(--status-error)', fontSize: '0.8rem' }}>Choked</span> : 
+                            <span style={{ color: 'var(--status-seeding)', fontSize: '0.8rem' }}>Active</span>
+                          }
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ marginTop: '12px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+              <i>* Choked peers are throttled by either our engine or theirs to optimize active swarms.</i>
+            </div>
+          </div>
+
+          <div style={{ backgroundColor: 'var(--bg-secondary)', padding: '16px', borderRadius: '8px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h4 style={{ margin: 0, fontSize: '1rem' }}>Piece Distribution Map</h4>
+              <div style={{ display: 'flex', gap: '8px', fontSize: '0.75rem' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <div style={{ width: '10px', height: '10px', backgroundColor: 'var(--status-seeding)' }}></div> Complete
+                </span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <div style={{ width: '10px', height: '10px', backgroundColor: 'var(--status-downloading)' }}></div> Requested
+                </span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <div style={{ width: '10px', height: '10px', backgroundColor: 'var(--bg-primary)' }}></div> Available
+                </span>
+              </div>
+            </div>
+            
+            <div style={{ 
+              display: 'grid', 
+              gridTemplateColumns: 'repeat(auto-fill, minmax(10px, 1fr))', 
+              gap: '2px',
+              maxHeight: '300px',
+              overflowY: 'auto',
+              padding: '4px'
+            }}>
+              {(!detail.pieces || detail.pieces.length === 0) ? (
+                <div style={{ gridColumn: '1 / -1', textAlign: 'center', opacity: 0.5, padding: '20px' }}>Loading piece data...</div>
+              ) : (
+                detail.pieces.map((piece, i) => {
+                  let bgColor = 'var(--bg-primary)'; // default available
+                  let opacity = 0.3 + (Math.min(piece.availability, 10) / 10) * 0.7; // opacity based on availability
+                  
+                  if (piece.is_complete) {
+                    bgColor = 'var(--status-seeding)';
+                    opacity = 1;
+                  } else if (piece.state === 'requested' || piece.state === 'downloading') {
+                    bgColor = 'var(--status-downloading)';
+                    opacity = 1;
+                  }
+                  
+                  return (
+                    <div 
+                      key={i} 
+                      title={`Piece ${piece.index} | State: ${piece.state} | Availability: ${piece.availability}`}
+                      style={{
+                        aspectRatio: '1/1',
+                        backgroundColor: bgColor,
+                        opacity: opacity,
+                        borderRadius: '1px'
+                      }}
+                    />
+                  );
+                })
+              )}
+            </div>
+            {detail.pieces && detail.pieces.length > 0 && (
+              <div style={{ marginTop: '12px', fontSize: '0.8rem', color: 'var(--text-secondary)', textAlign: 'right' }}>
+                Showing {Math.min(detail.pieces.length, 2000)} pieces
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

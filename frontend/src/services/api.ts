@@ -37,6 +37,9 @@ export const engineApi = {
   removeTorrent: (id: string) => 
     fetchApi(`/torrent/${id}/remove`, { method: "POST" }),
 
+  openFolder: (id: string) => 
+    fetchApi(`/torrent/${id}/open-folder`, { method: "POST" }),
+
   addTorrentFile: async (file: File, save_path?: string) => {
     const formData = new FormData();
     formData.append("file", file);
@@ -64,6 +67,13 @@ export const engineApi = {
     fetchApi<{ current_path: string; parent_path: string | null; directories: { name: string; path: string }[] }>(
         `/fs/browse${path ? `?path=${encodeURIComponent(path)}` : ''}`
     ),
+
+  createDirectory: (path: string, name: string) =>
+    fetchApi<{ path: string }>("/fs/mkdir", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, name }),
+    }),
 
   getDownloadsPath: () =>
     fetchApi<{ downloads_path: string }>("/fs/downloads-path"),

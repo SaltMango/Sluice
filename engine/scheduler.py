@@ -133,7 +133,7 @@ class Scheduler:
         incomplete_scores = [s for i, s in enumerate(scores) if not pieces[i].is_complete and pieces[i].state != PieceState.COMPLETE]
         
         if not incomplete_scores:
-            return [PriorityBucket.IGNORE if p.is_complete else PriorityBucket.DEFAULT for p in pieces]
+            return [PriorityBucket.DEFAULT for p in pieces]
 
         minimum = min(incomplete_scores)
         maximum = max(incomplete_scores)
@@ -158,7 +158,7 @@ class Scheduler:
         high_count = 0
         for i, piece in enumerate(pieces):
             if piece.is_complete or piece.state == PieceState.COMPLETE:
-                buckets.append(PriorityBucket.IGNORE)
+                buckets.append(PriorityBucket.DEFAULT)
                 continue
                 
             score = scores[i]

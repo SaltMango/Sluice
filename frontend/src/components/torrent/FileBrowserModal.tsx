@@ -13,6 +13,10 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({ onClose, onS
   const [directories, setDirectories] = useState<{name: string, path: string}[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  
+  const [showNewFolder, setShowNewFolder] = useState<boolean>(false);
+  const [newFolderName, setNewFolderName] = useState<string>("");
+  const [creatingFolder, setCreatingFolder] = useState<boolean>(false);
 
   const fetchDirectory = async (path?: string) => {
     setLoading(true);
@@ -38,6 +42,26 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({ onClose, onS
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const handleCreateFolder = async () => {
+    if (!newFolderName.trim()) return;
+    setCreatingFolder(true);
+    setError(null);
+    try {
+      const res = await engineApi.createDirectory(currentPath, newFolderName.trim());
+      if (res.success && res.data) {
+        setNewFolderName("");
+        setShowNewFolder(false);
+        fetchDirectory(res.data.path);
+      } else {
+        setError(res.error || "Failed to create folder");
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Error creating folder");
+    } finally {
+      setCreatingFolder(false);
+    }
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose} style={{ zIndex: 1000 }}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ width: '500px', maxWidth: '90%' }}>
@@ -46,20 +70,54 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({ onClose, onS
           <button className="close-btn" onClick={onClose}>&times;</button>
         </div>
 
-        <div style={{ marginBottom: '16px' }}>
-          <label className="form-label">Current Path</label>
-          <input 
-            type="text" 
-            className="form-input" 
-            value={currentPath}
-            onChange={(e) => setCurrentPath(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                fetchDirectory(currentPath);
-              }
+        <div style={{ marginBottom: '16px', display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
+          <div style={{ flex: 1 }}>
+            <label className="form-label">Current Path</label>
+            <input 
+              type="text" 
+              className="form-input" 
+              value={currentPath}
+              onChange={(e) => setCurrentPath(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  fetchDirectory(currentPath);
+                }
+              }}
+            />
+          </div>
+          <button 
+            type="button" 
+            className="btn" 
+            onClick={() => {
+              setShowNewFolder(!showNewFolder);
+              setError(null);
             }}
-          />
+          >
+            + New Folder
+          </button>
         </div>
+
+        {showNewFolder && (
+          <div style={{ marginBottom: '16px', display: 'flex', gap: '8px', padding: '12px', backgroundColor: 'var(--bg-secondary)', borderRadius: '4px' }}>
+            <input 
+              type="text" 
+              className="form-input" 
+              placeholder="Folder Name"
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleCreateFolder(); }}
+              autoFocus
+            />
+            <button 
+              type="button" 
+              className="btn btn-primary" 
+              onClick={handleCreateFolder}
+              disabled={creatingFolder || !newFolderName.trim()}
+            >
+              {creatingFolder ? '...' : 'Create'}
+            </button>
+          </div>
+        )}
 
         {error && <div style={{ color: 'var(--status-error)', fontSize: '0.875rem', marginBottom: '16px' }}>{error}</div>}
 

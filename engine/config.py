@@ -37,9 +37,9 @@ from dataclasses import dataclass, field
 
 @dataclass
 class EngineConfig:
-    peer_interval: float = 1.0
-    scheduler_interval: float = 2.0
-    bandwidth_interval: float = 1.0
+    peer_interval: float = 3.0
+    scheduler_interval: float = 15.0
+    bandwidth_interval: float = 30.0
     autosave_resume_interval: float = 60.0
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     peers: PeerConfig = field(default_factory=PeerConfig)

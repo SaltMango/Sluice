@@ -23,6 +23,8 @@ class TorrentItem(BaseModel):
     downloaded: int
     added_at: int
     error: Optional[str] = None
+    tune_level: int = 0
+    save_path: Optional[str] = None
 
 class ApiResponse(BaseModel):
     success: bool
